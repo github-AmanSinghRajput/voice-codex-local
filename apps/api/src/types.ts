@@ -14,6 +14,7 @@ export interface LogStore {
 }
 
 export interface WorkspaceState {
+  id: string | null;
   projectRoot: string | null;
   projectName: string | null;
   isGitRepo: boolean;
@@ -54,6 +55,62 @@ export interface AudioBridgeState {
   error: string | null;
 }
 
+export interface VoiceOption {
+  id: string;
+  name: string;
+  language: string;
+  quality: 'default' | 'enhanced' | 'premium';
+}
+
+export type TranscriptionModelProfile = 'default' | 'multilingual-small';
+
+export interface TranscriptionModelOption {
+  id: TranscriptionModelProfile;
+  label: string;
+  description: string;
+  available: boolean;
+}
+
+export interface TranscriptionLanguageOption {
+  code: string;
+  label: string;
+}
+
+export interface VoiceSettings {
+  silenceWindowMs: number;
+  voiceLocale: string;
+  autoResumeAfterReply: boolean;
+  transcriptionLanguageCode: string;
+  transcriptionModel: TranscriptionModelProfile;
+  ttsVoice: string;
+}
+
+export interface VoiceSettingsCapabilities {
+  deviceSelection: boolean;
+  voiceSelection: boolean;
+  interruption: boolean;
+}
+
+export type CodexReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+
+export interface CodexReasoningOption {
+  effort: CodexReasoningEffort;
+  description: string;
+}
+
+export interface CodexModelOption {
+  slug: string;
+  displayName: string;
+  description: string;
+  defaultReasoningEffort: CodexReasoningEffort | null;
+  supportedReasoningEfforts: CodexReasoningOption[];
+}
+
+export interface CodexSettings {
+  model: string | null;
+  reasoningEffort: CodexReasoningEffort | null;
+}
+
 export type VoiceSessionPhase = 'idle' | 'starting' | 'listening' | 'thinking' | 'speaking' | 'error';
 
 export interface VoiceSessionState {
@@ -62,7 +119,7 @@ export interface VoiceSessionState {
   liveTranscript: string;
   lastTranscript: string | null;
   silenceWindowMs: number;
-  transport: 'native-macos' | 'unsupported';
+  transport: 'desktop-media' | 'browser-webspeech' | 'unsupported';
   error: string | null;
 }
 

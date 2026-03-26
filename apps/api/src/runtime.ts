@@ -33,6 +33,7 @@ const secretPolicy = [
 
 const runtimeState: RuntimeState = {
   workspace: {
+    id: null,
     projectRoot: null,
     projectName: null,
     isGitRepo: false,
@@ -45,19 +46,19 @@ const runtimeState: RuntimeState = {
     platform: process.platform,
     available: process.platform === 'darwin',
     inputDeviceLabel: null,
-    outputDeviceLabel: 'System Default Output',
-    transcriptionEngine: process.platform === 'darwin' ? 'Apple Speech Framework' : 'Unavailable',
-    speechEngine: process.platform === 'darwin' ? 'macOS say' : 'Unavailable',
+    outputDeviceLabel: null,
+    transcriptionEngine: process.platform === 'darwin' ? 'Desktop media capture + STT provider' : 'Unavailable',
+    speechEngine: 'TTS Provider / Browser Fallback',
     lastCheckedAt: null,
-    error: process.platform === 'darwin' ? null : 'Native audio bridge currently supports macOS only.'
+    error: process.platform === 'darwin' ? null : 'Desktop voice capture currently supports macOS only.'
   },
   voiceSession: {
     active: false,
     phase: 'idle',
     liveTranscript: '',
     lastTranscript: null,
-    silenceWindowMs: 2000,
-    transport: process.platform === 'darwin' ? 'native-macos' : 'unsupported',
+    silenceWindowMs: 800,
+    transport: process.platform === 'darwin' ? 'desktop-media' : 'unsupported',
     error: null
   }
 };
@@ -106,9 +107,7 @@ export function getRuntimeState() {
 
 export async function setProjectRoot(projectRoot: string) {
   const validated = await validateProjectRoot(projectRoot);
-  runtimeState.workspace.projectRoot = validated.projectRoot;
-  runtimeState.workspace.projectName = validated.projectName;
-  runtimeState.workspace.isGitRepo = validated.isGitRepo;
+  setWorkspaceState(validated);
   runtimeState.pendingApproval = null;
   runtimeState.lastDiff = null;
   return runtimeState.workspace;
@@ -119,6 +118,15 @@ export function setWriteAccessEnabled(enabled: boolean) {
   if (!enabled) {
     runtimeState.pendingApproval = null;
   }
+  return runtimeState.workspace;
+}
+
+export function setWorkspaceState(nextState: Partial<Omit<WorkspaceState, 'secretPolicy'>>) {
+  runtimeState.workspace = {
+    ...runtimeState.workspace,
+    ...nextState
+  };
+
   return runtimeState.workspace;
 }
 

@@ -6,12 +6,13 @@
     "apps/*"
   ],
   "scripts": {
-    "dev": "concurrently -n api,web -c blue,green \"npm run dev --workspace @voice-codex/api\" \"npm run dev --workspace @voice-codex/web\"",
-    "build": "npm run build --workspace @voice-codex/api && npm run build --workspace @voice-codex/web",
+    "dev": "npm run dev:web",
+    "dev:web": "concurrently -n api,web -c blue,green \"npm run dev --workspace @voice-codex/api\" \"npm run dev --workspace @voice-codex/web\"",
+    "dev:desktop": "npm run build --workspace @voice-codex/desktop && concurrently -n web,desktop -c green,magenta \"npm run dev --workspace @voice-codex/web\" \"ELECTRON_RENDERER_URL=http://localhost:5173 npm run start --workspace @voice-codex/desktop\"",
+    "build": "npm run build --workspace @voice-codex/api && npm run build --workspace @voice-codex/web && npm run build --workspace @voice-codex/desktop",
     "start": "concurrently -n api,web -c blue,green \"npm run start --workspace @voice-codex/api\" \"npm run preview --workspace @voice-codex/web\""
   },
   "devDependencies": {
     "concurrently": "^9.2.1"
   }
 }
-

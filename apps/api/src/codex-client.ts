@@ -1,12 +1,68 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { ChatMessage, DiffSummary, PendingApproval, WorkspaceState } from './types.js';
+import { logger } from './lib/logger.js';
 import { getRootDir } from './store.js';
+import type { CodexSettingsService } from './features/codex/codex-settings.service.js';
 
 const execFileAsync = promisify(execFile);
+let codexSettingsService: CodexSettingsService | null = null;
+
+export function initCodexClient(settings: CodexSettingsService) {
+  codexSettingsService = settings;
+}
+
+export type CodexErrorKind = 'auth' | 'rate_limit' | 'service' | 'unknown';
+
+export class CodexClientError extends Error {
+  readonly kind: CodexErrorKind;
+  readonly friendlyMessage: string;
+
+  constructor(kind: CodexErrorKind, message: string, friendlyMessage: string) {
+    super(message);
+    this.name = 'CodexClientError';
+    this.kind = kind;
+    this.friendlyMessage = friendlyMessage;
+  }
+}
+
+function classifyCodexError(error: unknown): CodexClientError {
+  const message = error instanceof Error ? error.message : String(error);
+  const lower = message.toLowerCase();
+
+  if (/not logged in|login|auth|unauthorized|401|forbidden|403|session expired/i.test(lower)) {
+    return new CodexClientError(
+      'auth',
+      message,
+      'Your Codex session needs reconnecting. Run the login command to continue.'
+    );
+  }
+
+  if (/rate.?limit|too many requests|429|quota|throttl/i.test(lower)) {
+    return new CodexClientError(
+      'rate_limit',
+      message,
+      'Codex is rate limited right now. Give it a moment and try again.'
+    );
+  }
+
+  if (/timeout|timed out|econnrefused|econnreset|enotfound|network|socket/i.test(lower)) {
+    return new CodexClientError(
+      'service',
+      message,
+      'Codex is not responding right now. Check your connection and try again.'
+    );
+  }
+
+  return new CodexClientError(
+    'unknown',
+    message,
+    'Something went wrong with Codex. Try again or check the logs.'
+  );
+}
 
 interface WriteDecision {
   intent: 'reply' | 'propose_write';
@@ -17,12 +73,22 @@ interface WriteDecision {
   agents: string[];
 }
 
+interface StreamReplyOptions {
+  voiceTurnId?: string;
+  signal?: AbortSignal;
+  onTextSnapshot?: (text: string) => void;
+}
+
 const systemPrompt = [
   'You are Codex Voice Buddy, a sharp coding assistant.',
   'Respond as if you are speaking to one engineer live.',
   'Be concise, practical, and technically strong.',
   'Prefer short explanations, direct recommendations, and code-minded reasoning.',
-  'When the user asks for implementation advice, answer like a senior engineer.'
+  'When the user asks for implementation advice, answer like a senior engineer.',
+  'When you are about to propose code changes, first explain clearly what you plan to change and why.',
+  'Describe the changes in plain spoken English — which files, what modifications, and the reasoning.',
+  'Your explanation will be spoken aloud to the developer, so keep it natural and conversational.',
+  'After proposing changes that require approval, tell the developer to review the diff and approve or reject.'
 ].join(' ');
 
 function getCodexCommand() {
@@ -85,6 +151,9 @@ function buildWriteDecisionPrompt(userText: string, history: ChatMessage[], work
     'You are deciding whether the latest user request should remain a normal reply or become a write proposal requiring approval.',
     'Return reply only if the request can be satisfied without changing files or running project-changing commands.',
     'Return propose_write if the request asks for code changes, file edits, tests that may modify state, scaffolding, setup changes, or any action that should be approved first.',
+    'When returning propose_write, your assistant_text MUST be a clear spoken explanation of what you plan to change.',
+    'Describe which files will be modified, what the changes are, and why — as if you are explaining to a colleague in person.',
+    'End your explanation by asking the developer to review the diff and approve it before you proceed.',
     '',
     conversation ? `Conversation so far:\n${conversation}\n` : '',
     `Latest user message:\n${userText}`
@@ -148,9 +217,13 @@ async function runCodexPrompt(options: {
     outputFile
   ];
 
-  const model = process.env.CODEX_MODEL?.trim();
-  if (model) {
-    args.push('--model', model);
+  const executionSettings = codexSettingsService ? await codexSettingsService.getExecutionOverrides() : null;
+  if (executionSettings?.model) {
+    args.push('-c', `model=${executionSettings.model}`);
+  }
+
+  if (executionSettings?.reasoningEffort) {
+    args.push('-c', `model_reasoning_effort=${executionSettings.reasoningEffort}`);
   }
 
   let schemaFile: string | null = null;
@@ -174,14 +247,296 @@ async function runCodexPrompt(options: {
   }
 }
 
+function getExecutionOverrides() {
+  return codexSettingsService?.getExecutionOverrides() ?? Promise.resolve(null);
+}
+
+function createAbortError() {
+  const error = new Error('Codex stream aborted.');
+  error.name = 'AbortError';
+  return error;
+}
+
+async function runCodexPromptStream(options: {
+  cwd: string;
+  prompt: string;
+  signal?: AbortSignal;
+  onTextSnapshot?: (text: string) => void;
+}) {
+  const executionSettings = await getExecutionOverrides();
+
+  return new Promise<string>((resolve, reject) => {
+    const args = ['app-server', '--listen', 'stdio://'];
+    const child = spawn(getCodexCommand(), args, {
+      cwd: options.cwd,
+      env: process.env,
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+
+    let stdoutBuffer = '';
+    let stderrBuffer = '';
+    let settled = false;
+    let requestId = 0;
+    let threadId: string | null = null;
+    let finalText = '';
+    let latestText = '';
+    let abortListener: (() => void) | null = null;
+
+    const cleanup = () => {
+      if (abortListener && options.signal) {
+        options.signal.removeEventListener('abort', abortListener);
+      }
+      child.stdout.removeAllListeners();
+      child.stderr.removeAllListeners();
+      child.removeAllListeners();
+    };
+
+    const rejectOnce = (error: unknown) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      reject(error instanceof Error ? error : new Error(String(error)));
+    };
+
+    const resolveOnce = (value: string) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+
+    const send = (message: Record<string, unknown>) => {
+      child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', ...message })}\n`);
+    };
+
+    const startTurn = (nextThreadId: string) => {
+      const params: Record<string, unknown> = {
+        threadId: nextThreadId,
+        input: [
+          {
+            type: 'text',
+            text: options.prompt,
+            text_elements: []
+          }
+        ],
+        cwd: options.cwd,
+        approvalPolicy: 'never',
+        sandboxPolicy: {
+          type: 'readOnly',
+          access: { type: 'fullAccess' },
+          networkAccess: false
+        }
+      };
+
+      if (executionSettings?.model) {
+        params.model = executionSettings.model;
+      }
+
+      if (executionSettings?.reasoningEffort) {
+        params.effort = executionSettings.reasoningEffort;
+      }
+
+      send({
+        id: ++requestId,
+        method: 'turn/start',
+        params
+      });
+    };
+
+    const handleLine = (line: string) => {
+      let message: Record<string, unknown>;
+      try {
+        message = JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+
+      if (typeof message.id === 'number' && 'error' in message) {
+        const errorBody = message.error;
+        const errorMessage =
+          errorBody && typeof errorBody === 'object' && 'message' in errorBody
+            ? String((errorBody as { message?: unknown }).message ?? 'Codex stream failed.')
+            : 'Codex stream failed.';
+        rejectOnce(new Error(errorMessage));
+        child.kill('SIGTERM');
+        return;
+      }
+
+      if (message.id === 1 && 'result' in message) {
+        send({ method: 'initialized' });
+
+        const params: Record<string, unknown> = {
+          cwd: options.cwd,
+          approvalPolicy: 'never',
+          sandbox: 'read-only',
+          experimentalRawEvents: false,
+          persistExtendedHistory: false
+        };
+
+        if (executionSettings?.model) {
+          params.model = executionSettings.model;
+        }
+
+        send({
+          id: ++requestId,
+          method: 'thread/start',
+          params
+        });
+        return;
+      }
+
+      if (message.id === 2 && 'result' in message) {
+        const result = message.result;
+        if (!result || typeof result !== 'object') {
+          rejectOnce(new Error('Codex app-server did not return a thread.'));
+          child.kill('SIGTERM');
+          return;
+        }
+
+        const resultThreadId =
+          (result as { thread?: { id?: string } }).thread?.id?.trim?.() ?? '';
+        if (!resultThreadId) {
+          rejectOnce(new Error('Codex app-server returned an invalid thread id.'));
+          child.kill('SIGTERM');
+          return;
+        }
+
+        threadId = resultThreadId;
+        startTurn(resultThreadId);
+        return;
+      }
+
+      if (message.method === 'item/agentMessage/delta') {
+        const params = message.params as { threadId?: string; delta?: string } | undefined;
+        if (!params || params.threadId !== threadId || typeof params.delta !== 'string') {
+          return;
+        }
+
+        latestText += params.delta;
+        options.onTextSnapshot?.(latestText);
+        return;
+      }
+
+      if (message.method === 'item/completed') {
+        const params = message.params as { item?: { type?: string; text?: string } } | undefined;
+        if (params?.item?.type === 'agentMessage' && typeof params.item.text === 'string') {
+          finalText = params.item.text;
+          if (finalText !== latestText) {
+            latestText = finalText;
+            options.onTextSnapshot?.(latestText);
+          }
+        }
+        return;
+      }
+
+      if (message.method === 'turn/completed') {
+        child.kill('SIGTERM');
+        const result = (finalText || latestText).trim();
+        if (!result) {
+          rejectOnce(new Error('Codex completed the turn but returned no text.'));
+        } else {
+          resolveOnce(result);
+        }
+      }
+    };
+
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      stdoutBuffer += chunk;
+      while (true) {
+        const newlineIndex = stdoutBuffer.indexOf('\n');
+        if (newlineIndex < 0) {
+          break;
+        }
+        const line = stdoutBuffer.slice(0, newlineIndex).trim();
+        stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
+        if (!line) {
+          continue;
+        }
+        handleLine(line);
+      }
+    });
+
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk: string) => {
+      stderrBuffer += chunk;
+    });
+
+    child.once('error', (error) => {
+      rejectOnce(error);
+    });
+
+    child.once('exit', (code, signal) => {
+      if (settled) {
+        return;
+      }
+
+      if (options.signal?.aborted) {
+        rejectOnce(createAbortError());
+        return;
+      }
+
+      const stderrText = stderrBuffer.trim();
+      rejectOnce(
+        new Error(
+          stderrText ||
+            `Codex app-server exited before completing the reply (${code ?? signal ?? 'unknown'}).`
+        )
+      );
+    });
+
+    if (options.signal) {
+      abortListener = () => {
+        try { child.kill('SIGTERM'); } catch {}
+        setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 3000).unref();
+        rejectOnce(createAbortError());
+      };
+
+      if (options.signal.aborted) {
+        abortListener();
+        return;
+      }
+
+      options.signal.addEventListener('abort', abortListener, { once: true });
+    }
+
+    send({
+      id: ++requestId,
+      method: 'initialize',
+      params: {
+        clientInfo: {
+          name: 'voice-codex-api',
+          title: 'Voice Codex API',
+          version: '0.1.0'
+        },
+        capabilities: {
+          experimentalApi: true
+        }
+      }
+    });
+  });
+}
+
 async function assertCodexReady() {
   const codexStatus = await getCodexStatus();
   if (!codexStatus.installed) {
-    throw new Error('Codex CLI is not installed on this machine.');
+    throw new CodexClientError(
+      'service',
+      'Codex CLI is not installed on this machine.',
+      'Codex is not installed on this machine. Install it first to continue.'
+    );
   }
 
   if (!codexStatus.loggedIn) {
-    throw new Error('Codex CLI is not logged in. Run `codex login --device-auth` and sign in.');
+    throw new CodexClientError(
+      'auth',
+      'Codex CLI is not logged in.',
+      'Your Codex session needs reconnecting. Run the login command to continue.'
+    );
   }
 }
 
@@ -224,14 +579,68 @@ export async function logoutCodex() {
 export async function generateAssistantReply(
   userText: string,
   history: ChatMessage[],
-  workspace: WorkspaceState
+  workspace: WorkspaceState,
+  options?: { voiceTurnId?: string }
 ) {
   await assertCodexReady();
   const cwd = workspace.projectRoot ?? getRootDir();
+  const startedAt = Date.now();
   const text = await runCodexPrompt({
     cwd,
     sandbox: 'read-only',
     prompt: buildReadOnlyPrompt(userText, history, workspace)
+  });
+  logger.info('codex.prompt.completed', {
+    operation: 'generate_reply',
+    sandbox: 'read-only',
+    durationMs: Date.now() - startedAt,
+    projectName: path.basename(cwd),
+    promptLength: userText.length,
+    responseLength: text.length,
+    ...(options?.voiceTurnId ? { voiceTurnId: options.voiceTurnId } : {})
+  });
+
+  return { text };
+}
+
+export async function streamAssistantReply(
+  userText: string,
+  history: ChatMessage[],
+  workspace: WorkspaceState,
+  options?: StreamReplyOptions
+) {
+  await assertCodexReady();
+  const cwd = workspace.projectRoot ?? getRootDir();
+  const startedAt = Date.now();
+  let text: string;
+  try {
+    text = await runCodexPromptStream({
+      cwd,
+      prompt: buildReadOnlyPrompt(userText, history, workspace),
+      signal: options?.signal,
+      onTextSnapshot: options?.onTextSnapshot
+    });
+  } catch (error) {
+    const classified = error instanceof CodexClientError ? error : classifyCodexError(error);
+    logger.error('codex.stream.failed', {
+      operation: 'stream_reply',
+      errorKind: classified.kind,
+      durationMs: Date.now() - startedAt,
+      projectName: path.basename(cwd),
+      error: classified.message,
+      ...(options?.voiceTurnId ? { voiceTurnId: options.voiceTurnId } : {})
+    });
+    throw classified;
+  }
+
+  logger.info('codex.prompt.completed', {
+    operation: 'stream_reply',
+    sandbox: 'read-only',
+    durationMs: Date.now() - startedAt,
+    projectName: path.basename(cwd),
+    promptLength: userText.length,
+    responseLength: text.length,
+    ...(options?.voiceTurnId ? { voiceTurnId: options.voiceTurnId } : {})
   });
 
   return { text };
@@ -240,10 +649,12 @@ export async function generateAssistantReply(
 export async function decideWriteIntent(
   userText: string,
   history: ChatMessage[],
-  workspace: WorkspaceState
+  workspace: WorkspaceState,
+  options?: { voiceTurnId?: string }
 ) {
   await assertCodexReady();
   const cwd = workspace.projectRoot ?? getRootDir();
+  const startedAt = Date.now();
   const schema = {
     type: 'object',
     properties: {
@@ -282,6 +693,15 @@ export async function decideWriteIntent(
     sandbox: 'read-only',
     prompt: buildWriteDecisionPrompt(userText, history, workspace),
     outputSchema: schema
+  });
+  logger.info('codex.prompt.completed', {
+    operation: 'decide_write_intent',
+    sandbox: 'read-only',
+    durationMs: Date.now() - startedAt,
+    projectName: path.basename(cwd),
+    promptLength: userText.length,
+    responseLength: raw.length,
+    ...(options?.voiceTurnId ? { voiceTurnId: options.voiceTurnId } : {})
   });
 
   return JSON.parse(raw) as WriteDecision;
@@ -393,13 +813,24 @@ export async function collectGitDiff(projectRoot: string): Promise<DiffSummary> 
 export async function executeApprovedWrite(
   approval: PendingApproval,
   history: ChatMessage[],
-  workspace: WorkspaceState
+  workspace: WorkspaceState,
+  options?: { voiceTurnId?: string }
 ) {
   await assertCodexReady();
+  const startedAt = Date.now();
   const text = await runCodexPrompt({
     cwd: approval.projectRoot,
     sandbox: 'workspace-write',
     prompt: buildWriteExecutionPrompt(approval, history, workspace)
+  });
+  logger.info('codex.prompt.completed', {
+    operation: 'execute_approved_write',
+    sandbox: 'workspace-write',
+    durationMs: Date.now() - startedAt,
+    projectName: path.basename(approval.projectRoot),
+    taskCount: approval.tasks.length,
+    responseLength: text.length,
+    ...(options?.voiceTurnId ? { voiceTurnId: options.voiceTurnId } : {})
   });
 
   return { text };
