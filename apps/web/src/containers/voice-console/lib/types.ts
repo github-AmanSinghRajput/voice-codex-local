@@ -70,7 +70,13 @@ export interface VoiceOption {
   quality: 'default' | 'enhanced' | 'premium';
 }
 
-export type TranscriptionModelProfile = 'default' | 'multilingual-small';
+export type TranscriptionModelProfile =
+  | 'default'
+  | 'multilingual-small'
+  | 'moonshine-base'
+  | 'moonshine-tiny';
+export type VoiceQualityProfile = 'low_memory' | 'balanced' | 'demo';
+export type VoiceNoiseMode = 'normal' | 'focused' | 'noisy_room';
 
 export interface TranscriptionModelOption {
   id: TranscriptionModelProfile;
@@ -84,6 +90,15 @@ export interface TranscriptionLanguageOption {
   label: string;
 }
 
+export type VoiceNarrationMode = 'narrated' | 'silent_progress' | 'muted';
+export type AppTheme = 'dark' | 'light';
+
+export interface AppSettings {
+  displayName: string | null;
+  theme: AppTheme;
+  welcomedAt: string | null;
+}
+
 export interface VoiceSettings {
   silenceWindowMs: number;
   voiceLocale: string;
@@ -91,6 +106,9 @@ export interface VoiceSettings {
   transcriptionLanguageCode: string;
   transcriptionModel: TranscriptionModelProfile;
   ttsVoice: string;
+  narrationMode: VoiceNarrationMode;
+  qualityProfile: VoiceQualityProfile;
+  noiseMode: VoiceNoiseMode;
 }
 
 export interface VoiceSettingsCapabilities {
@@ -133,11 +151,30 @@ export interface CodexSettings {
   reasoningEffort: CodexReasoningEffort | null;
 }
 
+export interface ClaudeModelOption {
+  slug: string;
+  displayName: string;
+  description: string;
+  suggestedForDiscussion: boolean;
+}
+
+export interface ClaudeSettings {
+  model: string | null;
+}
+
 export interface CodexSettingsResponse {
   settings: CodexSettings;
   source: 'app' | 'environment' | 'global' | 'default';
   options: {
     models: CodexModelOption[];
+  };
+}
+
+export interface ClaudeSettingsResponse {
+  settings: ClaudeSettings;
+  source: 'app' | 'default';
+  options: {
+    models: ClaudeModelOption[];
   };
 }
 
@@ -148,6 +185,29 @@ export interface CodexStatus {
   statusText: string;
 }
 
+export type AssistantProviderId = 'codex' | 'claude';
+
+export interface AssistantProviderStatus {
+  id: AssistantProviderId;
+  name: string;
+  installed: boolean;
+  loggedIn: boolean;
+  appConnected: boolean;
+  connectedAt: string | null;
+  accountLabel: string | null;
+  authMode: string | null;
+  statusText: string;
+  loginCommand: string;
+  logoutCommand: string | null;
+  canSwitchAccount: boolean;
+}
+
+export interface AssistantProvidersState {
+  activeProviderId: AssistantProviderId | null;
+  activeProvider: AssistantProviderStatus | null;
+  providers: AssistantProviderStatus[];
+}
+
 export interface DatabaseStatus {
   configured: boolean;
   reachable: boolean;
@@ -156,6 +216,8 @@ export interface DatabaseStatus {
 
 export interface StatusResponse {
   codexStatus: CodexStatus;
+  assistantProviders: AssistantProvidersState;
+  appSettings: AppSettings;
   workspace: WorkspaceState;
   pendingApproval: PendingApproval | null;
   lastDiff: DiffSummary | null;
@@ -217,6 +279,10 @@ export type ChatStreamEvent =
       assistantMessage: MessageEntry;
     }
   | {
+      type: 'activity';
+      activity: string;
+    }
+  | {
       type: 'completed';
       result: ReplyResponse | ApprovalRequiredResponse;
     }
@@ -236,6 +302,7 @@ export interface VoiceSessionResponse {
 
 export interface ClearResponse {
   ok: boolean;
+  assistantProviders?: AssistantProvidersState;
 }
 
 export interface VoiceTranscriptionResponse {
@@ -255,11 +322,16 @@ export interface TtsSynthesisResponse {
 
 export type VoiceCommandScreen = 'voice' | 'workspace' | 'review' | 'terminal';
 
-export interface VoiceCommandAction {
-  type: 'set_codex_model';
-  model: string;
-  reasoningEffort: CodexReasoningEffort | null;
-}
+export type VoiceCommandAction =
+  | {
+      type: 'set_codex_model';
+      model: string;
+      reasoningEffort: CodexReasoningEffort | null;
+    }
+  | {
+      type: 'set_claude_model';
+      model: string;
+    };
 
 export interface VoiceCommandOption {
   id: string;
@@ -364,6 +436,21 @@ export interface DiffRow {
   rightLineNumber: number | null;
   rightText: string;
   rightKind: 'context' | 'add' | 'empty';
+}
+
+export interface DiffHunk {
+  header: string;
+  oldStart: number;
+  oldCount: number;
+  newStart: number;
+  newCount: number;
+  contextLabel: string;
+  rows: DiffRow[];
+}
+
+export interface ParsedFileDiff {
+  hunks: DiffHunk[];
+  stats: { additions: number; deletions: number };
 }
 
 export interface VoiceEventPayload {
