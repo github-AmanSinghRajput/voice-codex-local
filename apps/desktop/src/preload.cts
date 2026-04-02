@@ -3,6 +3,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('desktopShell', {
   platform: process.platform,
   isDesktop: true,
+  apiBaseUrl: process.env.ELECTRON_API_BASE_URL ?? 'http://127.0.0.1:8787',
+  apiAuthToken: process.env.LOCAL_API_AUTH_TOKEN ?? null,
   getRuntimeStatus: () => ipcRenderer.invoke('desktop:get-runtime-status'),
   pickProjectFolder: () => ipcRenderer.invoke('desktop:pick-project-folder'),
   subscribeRuntimeStatus: (callback: (status: unknown) => void) => {

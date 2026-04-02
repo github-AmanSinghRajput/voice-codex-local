@@ -1,10 +1,13 @@
 import { BaseApiService } from './BaseApiService';
 import type {
+  AppSettings,
+  AssistantProvidersState,
   ApprovalHistoryResponse,
   ApprovalRequiredResponse,
   ApprovalResponse,
   AuthSessionsResponse,
   ChatStreamEvent,
+  ClaudeSettingsResponse,
   CodexSettingsResponse,
   ClearResponse,
   CreateNoteInput,
@@ -35,6 +38,20 @@ export class OperatorConsoleApiService extends BaseApiService {
     return this.request<SystemResponse>('/api/system');
   }
 
+  getAppSettings() {
+    return this.request<AppSettings>('/api/app/settings');
+  }
+
+  updateAppSettings(input: Partial<AppSettings>) {
+    return this.request<AppSettings>('/api/app/settings', {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(input)
+    });
+  }
+
   getLogs() {
     return this.request<LogsResponse>('/api/logs');
   }
@@ -42,6 +59,12 @@ export class OperatorConsoleApiService extends BaseApiService {
   clearLogs() {
     return this.request<ClearResponse>('/api/logs', {
       method: 'DELETE'
+    });
+  }
+
+  resetApp() {
+    return this.request<ClearResponse>('/api/app/reset', {
+      method: 'POST'
     });
   }
 
@@ -65,8 +88,24 @@ export class OperatorConsoleApiService extends BaseApiService {
     });
   }
 
-  logoutCodex() {
-    return this.request<ClearResponse>('/api/codex/logout', {
+  setActiveProvider(providerId: 'codex' | 'claude') {
+    return this.request<AssistantProvidersState>('/api/assistant/active-provider', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ providerId })
+    });
+  }
+
+  connectProvider(providerId: 'codex' | 'claude') {
+    return this.request<ClearResponse>(`/api/assistant/providers/${providerId}/connect`, {
+      method: 'POST'
+    });
+  }
+
+  disconnectProvider(providerId: 'codex' | 'claude') {
+    return this.request<ClearResponse>(`/api/assistant/providers/${providerId}/disconnect`, {
       method: 'POST'
     });
   }
@@ -77,6 +116,20 @@ export class OperatorConsoleApiService extends BaseApiService {
 
   updateCodexSettings(input: Partial<CodexSettingsResponse['settings']>) {
     return this.request<CodexSettingsResponse>('/api/codex/settings', {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(input)
+    });
+  }
+
+  getClaudeSettings() {
+    return this.request<ClaudeSettingsResponse>('/api/claude/settings');
+  }
+
+  updateClaudeSettings(input: Partial<ClaudeSettingsResponse['settings']>) {
+    return this.request<ClaudeSettingsResponse>('/api/claude/settings', {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json'
@@ -105,6 +158,7 @@ export class OperatorConsoleApiService extends BaseApiService {
     const response = await fetch(`${this.baseUrl}/api/chat/text/stream`, {
       method: 'POST',
       headers: {
+        ...Object.fromEntries(this.createHeaders().entries()),
         'Content-Type': 'application/json',
         ...(options?.voiceTurnId ? { 'X-Voice-Turn-Id': options.voiceTurnId } : {})
       },
@@ -139,8 +193,12 @@ export class OperatorConsoleApiService extends BaseApiService {
         if (line) {
           try {
             onEvent(JSON.parse(line) as ChatStreamEvent);
-          } catch {
-            console.warn('[stream] skipping malformed NDJSON line', line.slice(0, 120));
+          } catch (parseError) {
+            if (parseError instanceof SyntaxError) {
+              console.warn('[stream] skipping malformed NDJSON line', line.slice(0, 120));
+            } else {
+              throw parseError;
+            }
           }
         }
         newlineIndex = buffer.indexOf('\n');
@@ -151,8 +209,12 @@ export class OperatorConsoleApiService extends BaseApiService {
         if (tail) {
           try {
             onEvent(JSON.parse(tail) as ChatStreamEvent);
-          } catch {
-            console.warn('[stream] skipping malformed NDJSON tail', tail.slice(0, 120));
+          } catch (parseError) {
+            if (parseError instanceof SyntaxError) {
+              console.warn('[stream] skipping malformed NDJSON tail', tail.slice(0, 120));
+            } else {
+              throw parseError;
+            }
           }
         }
         break;
@@ -174,6 +236,18 @@ export class OperatorConsoleApiService extends BaseApiService {
 
   startVoiceSession() {
     return this.request<VoiceSessionResponse>('/api/voice/session/start', {
+      method: 'POST'
+    });
+  }
+
+  warmVoiceSession() {
+    return this.request<{ ok: boolean }>('/api/voice/session/warmup', {
+      method: 'POST'
+    });
+  }
+
+  releaseVoiceWarmup() {
+    return this.request<{ ok: boolean }>('/api/voice/session/warmup/release', {
       method: 'POST'
     });
   }

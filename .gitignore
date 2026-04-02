@@ -2,6 +2,7 @@ node_modules
 dist
 .DS_Store
 .env
+.local-api-auth-token
 .npm-cache
 .vscode
 __pycache__/

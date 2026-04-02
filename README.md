@@ -15,9 +15,9 @@ It is designed to let a developer:
 
 - `README.md`: repository overview and run instructions
 - `CLAUDE.md`: architecture overview and developer guidance for AI agents
-- `docs/PRODUCT_GUIDE.md`: main long-form product, vision, scope, and release guide
 - `docs/RELEASE_MILESTONES.md`: active checkbox roadmap for `v1.0`, `v1.1`, `v1.2`, and `v2.0`
-- `docs/SECURITY_NOTES.md`: security model, current gaps, and next hardening steps
+
+Internal product/security planning docs are kept outside the tracked repository.
 
 ## Repository layout
 
@@ -68,8 +68,6 @@ The product is evolving toward:
 - inbuilt meeting notes / memory in later releases
 - Railway-backed product data and sync
 - future specialist sub-agents
-
-The main reference for that direction is `docs/PRODUCT_GUIDE.md`.
 
 The working milestone tracker is `docs/RELEASE_MILESTONES.md`.
 
@@ -252,7 +250,7 @@ WHISPER_SERVER_PORT=8791
 TRANSCRIPTION_LANGUAGE_CODE=auto
 TTS_PROVIDER=none
 KOKORO_COMMAND=
-KOKORO_VOICE=af_heart
+KOKORO_VOICE=am_michael
 KOKORO_LANG_CODE=a
 KOKORO_SPEED=1
 ```
@@ -288,6 +286,7 @@ Current `v1.0.0` direction:
 - spoken output uses a pluggable TTS path
 - current backend TTS provider is configurable through `TTS_PROVIDER`
 - current preferred local provider direction is `Kokoro-82M`
+- current preferred low-latency local STT direction is `Moonshine`, with `whisper.cpp` kept as fallback
 - generated assistant audio is deleted after playback and should never become durable user data
 
 The public product is no longer a browser-first web app. The website is the download surface for the desktop app.
@@ -310,12 +309,37 @@ Then set your `.env` values:
 ```bash
 TTS_PROVIDER=kokoro
 KOKORO_COMMAND=/Users/amansingh/Desktop/org/voice-codex-local/local-models/kokoro/.venv/bin/python /Users/amansingh/Desktop/org/voice-codex-local/apps/api/scripts/kokoro_tts.py
-KOKORO_VOICE=af_heart
+KOKORO_VOICE=am_michael
 KOKORO_LANG_CODE=a
 KOKORO_SPEED=1
 ```
 
 Generated audio is treated as temporary playback data and is deleted after use.
+
+## Local Moonshine setup
+
+If you want the lower-latency local STT path, install Moonshine in a dedicated virtualenv and point the backend at the repo worker.
+
+```bash
+cd /Users/amansingh/Desktop/org/voice-codex-local/local-models
+mkdir -p moonshine
+cd moonshine
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+pip install useful-moonshine-onnx
+```
+
+Then set your `.env` values:
+
+```bash
+STT_PROVIDER=moonshine-local
+STT_FALLBACK_PROVIDER=whisper-local
+MOONSHINE_WORKER_COMMAND=/Users/amansingh/Desktop/org/voice-codex-local/local-models/moonshine/.venv/bin/python /Users/amansingh/Desktop/org/voice-codex-local/apps/api/scripts/moonshine_worker.py
+MOONSHINE_MODEL=moonshine/base
+```
+
+Moonshine integrates as a local worker so the model stays warm during the voice session.
 
 ## Backend infrastructure direction
 

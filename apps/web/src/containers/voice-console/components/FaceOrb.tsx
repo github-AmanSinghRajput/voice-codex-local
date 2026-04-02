@@ -8,23 +8,20 @@ interface FaceOrbProps {
 
 export function FaceOrb({ voiceState, large = false }: FaceOrbProps) {
   return (
-    <div className={`face-orb ${voiceState} ${large ? 'face-orb-large' : ''}`}>
-      <span className="face-orb-ring face-orb-ring-outer" />
-      <span className="face-orb-ring face-orb-ring-mid" />
-      <span className="face-orb-ring face-orb-ring-inner" />
-      <span className="face-orb-core" />
-      <div className="face-orb-eyes" aria-hidden="true">
-        <span className="face-orb-eye" />
-        <span className="face-orb-eye" />
+    <div className={`voice-orb ${voiceState} ${large ? 'voice-orb-large' : ''}`}>
+      <span className="voice-orb-backdrop" />
+      <span className="voice-orb-glow voice-orb-glow-primary" />
+      <span className="voice-orb-glow voice-orb-glow-secondary" />
+      <div className="voice-orb-wavefield" aria-hidden="true">
+        {Array.from({ length: 4 }).map((_, index) => (
+          <span className={`voice-orb-wave voice-orb-wave-${index + 1}`} key={index}>
+            <svg viewBox="0 0 320 96" preserveAspectRatio="none">
+              <path d="M0 48 C24 48 24 20 48 20 S72 76 96 76 120 30 144 30 168 66 192 66 216 24 240 24 264 72 288 72 312 48 320 48" />
+            </svg>
+          </span>
+        ))}
       </div>
-      <div className="face-orb-mouth" aria-hidden="true">
-        <span />
-        <span />
-        <span />
-        <span />
-        <span />
-      </div>
-      <span className="face-orb-state">{getVoiceStateLabel(voiceState)}</span>
+      <span className="voice-orb-state">{getVoiceStateLabel(voiceState)}</span>
     </div>
   );
 }

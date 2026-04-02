@@ -5,6 +5,7 @@ import { env } from '../../config/env.js';
 import type { VoiceOption } from '../../types.js';
 
 const KOKORO_CACHE_REPO_DIR = 'models--hexgrad--Kokoro-82M';
+const PREFERRED_VOICE_ORDER = ['am_michael', 'af_heart', 'af_bella', 'af_nova', 'af_jessica'] as const;
 
 const LANGUAGE_LABELS: Record<string, string> = {
   a: 'English (US)',
@@ -25,7 +26,17 @@ export async function listAvailableKokoroVoices() {
     voiceIds.add(env.kokoroVoice.trim());
   }
 
-  return [...voiceIds].sort().map(toKokoroVoiceOption);
+  const curatedVoiceIds = [
+    ...PREFERRED_VOICE_ORDER.filter((voiceId) => voiceIds.has(voiceId)),
+    ...[...voiceIds].sort().filter((voiceId) => !PREFERRED_VOICE_ORDER.includes(voiceId as typeof PREFERRED_VOICE_ORDER[number]))
+  ].slice(0, 5);
+
+  if (env.kokoroVoice.trim() && !curatedVoiceIds.includes(env.kokoroVoice.trim())) {
+    curatedVoiceIds.pop();
+    curatedVoiceIds.push(env.kokoroVoice.trim());
+  }
+
+  return curatedVoiceIds.map(toKokoroVoiceOption);
 }
 
 export function deriveKokoroVoiceLangCode(voiceId: string, fallback = env.kokoroLangCode) {
@@ -51,7 +62,7 @@ export function toKokoroVoiceOption(voiceId: string): VoiceOption {
     id: trimmed,
     name: descriptor ? toTitleCase(descriptor) : trimmed,
     language: genderLabel ? `${languageLabel} ${genderLabel}` : languageLabel,
-    quality: 'default'
+    quality: PREFERRED_VOICE_ORDER.includes(trimmed as typeof PREFERRED_VOICE_ORDER[number]) ? 'enhanced' : 'default'
   };
 }
 

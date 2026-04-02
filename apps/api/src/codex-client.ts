@@ -5,6 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import type { ChatMessage, DiffSummary, PendingApproval, WorkspaceState } from './types.js';
 import { logger } from './lib/logger.js';
+import { isProtectedWorkspacePath } from './lib/path-security.js';
 import { getRootDir } from './store.js';
 import type { CodexSettingsService } from './features/codex/codex-settings.service.js';
 
@@ -30,7 +31,7 @@ export class CodexClientError extends Error {
 }
 
 function classifyCodexError(error: unknown): CodexClientError {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = extractCodexErrorMessage(error);
   const lower = message.toLowerCase();
 
   if (/not logged in|login|auth|unauthorized|401|forbidden|403|session expired/i.test(lower)) {
@@ -45,7 +46,9 @@ function classifyCodexError(error: unknown): CodexClientError {
     return new CodexClientError(
       'rate_limit',
       message,
-      'Codex is rate limited right now. Give it a moment and try again.'
+      /resets?\s|retry after|try again in|wait \d/i.test(lower)
+        ? message
+        : 'Codex is rate limited right now. Give it a moment and try again.'
     );
   }
 
@@ -64,6 +67,45 @@ function classifyCodexError(error: unknown): CodexClientError {
   );
 }
 
+function extractCodexErrorMessage(error: unknown) {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+
+  const detailCandidates = [
+    (error as { stderr?: unknown }).stderr,
+    (error as { stdout?: unknown }).stdout,
+    error.message
+  ]
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    .map((value) =>
+      value
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .filter((line) => !line.startsWith('Command failed:'))
+        .join('\n')
+    )
+    .filter(Boolean);
+
+  for (const candidate of detailCandidates) {
+    const lines = candidate.split('\n').map((line) => line.trim()).filter(Boolean);
+    const explicitLimit = lines.find((line) =>
+      /rate.?limit|quota|too many requests|429|resets?\s|retry after|try again in/i.test(line)
+    );
+    if (explicitLimit) {
+      return explicitLimit;
+    }
+
+    const usefulLine = lines.find((line) => !line.startsWith('Error:'));
+    if (usefulLine) {
+      return usefulLine;
+    }
+  }
+
+  return error.message;
+}
+
 interface WriteDecision {
   intent: 'reply' | 'propose_write';
   assistant_text: string;
@@ -77,6 +119,7 @@ interface StreamReplyOptions {
   voiceTurnId?: string;
   signal?: AbortSignal;
   onTextSnapshot?: (text: string) => void;
+  onActivityUpdate?: (activity: string) => void;
 }
 
 const systemPrompt = [
@@ -102,6 +145,29 @@ function normalizeStatusText(output: string) {
     .filter((line) => line && !line.startsWith('WARNING:'))
     .join('\n')
     .trim();
+}
+
+function extractAccountLabel(statusText: string) {
+  const emailMatch = statusText.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  if (emailMatch?.[0]) {
+    return emailMatch[0];
+  }
+
+  const explicitLabelPatterns = [
+    /logged in as[:\s]+(.+)$/im,
+    /account[:\s]+(.+)$/im,
+    /user[:\s]+(.+)$/im
+  ];
+
+  for (const pattern of explicitLabelPatterns) {
+    const match = statusText.match(pattern);
+    const label = match?.[1]?.trim();
+    if (label) {
+      return label;
+    }
+  }
+
+  return null;
 }
 
 function buildConversation(history: ChatMessage[]) {
@@ -262,6 +328,7 @@ async function runCodexPromptStream(options: {
   prompt: string;
   signal?: AbortSignal;
   onTextSnapshot?: (text: string) => void;
+  onActivityUpdate?: (activity: string) => void;
 }) {
   const executionSettings = await getExecutionOverrides();
 
@@ -280,6 +347,7 @@ async function runCodexPromptStream(options: {
     let threadId: string | null = null;
     let finalText = '';
     let latestText = '';
+    let lastActivity = '';
     let abortListener: (() => void) | null = null;
 
     const cleanup = () => {
@@ -421,6 +489,22 @@ async function runCodexPromptStream(options: {
         return;
       }
 
+      if (message.method === 'item/started') {
+        const params = message.params as
+          | { threadId?: string; item?: Record<string, unknown> }
+          | undefined;
+        if (!params || params.threadId !== threadId || !params.item) {
+          return;
+        }
+
+        const activity = describeStreamActivity(params.item, options.cwd);
+        if (activity && activity !== lastActivity) {
+          lastActivity = activity;
+          options.onActivityUpdate?.(activity);
+        }
+        return;
+      }
+
       if (message.method === 'item/completed') {
         const params = message.params as { item?: { type?: string; text?: string } } | undefined;
         if (params?.item?.type === 'agentMessage' && typeof params.item.text === 'string') {
@@ -556,6 +640,7 @@ export async function getCodexStatus() {
     return {
       installed: true,
       loggedIn,
+      accountLabel: loggedIn ? extractAccountLabel(statusText) : null,
       authMode: authModeMatch?.[1]?.trim() ?? (loggedIn ? 'Configured' : null),
       statusText
     };
@@ -566,6 +651,7 @@ export async function getCodexStatus() {
     return {
       installed: !/ENOENT/.test(message),
       loggedIn: false,
+      accountLabel: null,
       authMode: null,
       statusText: message
     };
@@ -612,13 +698,24 @@ export async function streamAssistantReply(
   await assertCodexReady();
   const cwd = workspace.projectRoot ?? getRootDir();
   const startedAt = Date.now();
+
+  if (options?.signal?.aborted) {
+    logger.warn('codex.stream.pre_aborted', {
+      operation: 'stream_reply',
+      projectName: path.basename(cwd),
+      ...(options?.voiceTurnId ? { voiceTurnId: options.voiceTurnId } : {})
+    });
+    throw createAbortError();
+  }
+
   let text: string;
   try {
     text = await runCodexPromptStream({
       cwd,
       prompt: buildReadOnlyPrompt(userText, history, workspace),
       signal: options?.signal,
-      onTextSnapshot: options?.onTextSnapshot
+      onTextSnapshot: options?.onTextSnapshot,
+      onActivityUpdate: options?.onActivityUpdate
     });
   } catch (error) {
     const classified = error instanceof CodexClientError ? error : classifyCodexError(error);
@@ -644,6 +741,101 @@ export async function streamAssistantReply(
   });
 
   return { text };
+}
+
+function describeStreamActivity(item: Record<string, unknown>, cwd: string) {
+  const type = typeof item.type === 'string' ? item.type : null;
+  if (!type) {
+    return null;
+  }
+
+  switch (type) {
+    case 'reasoning':
+      return 'Thinking through the request';
+    case 'plan':
+      return 'Planning the next steps';
+    case 'commandExecution':
+      return describeCommandExecution(item, cwd);
+    case 'fileChange':
+      return describeFileChange(item, cwd);
+    case 'mcpToolCall': {
+      const server = typeof item.server === 'string' ? item.server : 'tool';
+      const tool = typeof item.tool === 'string' ? item.tool : 'tool';
+      return `Using ${server}/${tool}`;
+    }
+    case 'dynamicToolCall': {
+      const tool = typeof item.tool === 'string' ? item.tool : 'tool';
+      return `Using ${tool}`;
+    }
+    case 'webSearch': {
+      const query = typeof item.query === 'string' ? item.query.trim() : '';
+      return query ? `Searching for ${query}` : 'Searching for related context';
+    }
+    default:
+      return null;
+  }
+}
+
+function describeCommandExecution(item: Record<string, unknown>, cwd: string) {
+  const commandActions = Array.isArray(item.commandActions)
+    ? (item.commandActions as Array<Record<string, unknown>>)
+    : [];
+
+  for (const action of commandActions) {
+    if (action.type === 'read') {
+      const targetPath = typeof action.path === 'string' ? action.path : '';
+      return `Reading ${displayPath(targetPath, cwd)}`;
+    }
+
+    if (action.type === 'listFiles') {
+      const targetPath = typeof action.path === 'string' ? action.path : '';
+      return targetPath ? `Scanning ${displayPath(targetPath, cwd)}` : 'Scanning the workspace';
+    }
+
+    if (action.type === 'search') {
+      const query = typeof action.query === 'string' ? action.query.trim() : '';
+      return query ? `Searching for ${query}` : 'Searching for related files';
+    }
+  }
+
+  const command = typeof item.command === 'string' ? item.command.trim() : '';
+  if (!command) {
+    return 'Running a command';
+  }
+
+  const summary = command.split(/\s+/).slice(0, 3).join(' ');
+  return `Running ${summary}`;
+}
+
+function describeFileChange(item: Record<string, unknown>, cwd: string) {
+  const changes = Array.isArray(item.changes)
+    ? (item.changes as Array<Record<string, unknown>>)
+    : [];
+  const firstChange = changes.find((change) => typeof change.path === 'string');
+
+  if (firstChange && typeof firstChange.path === 'string') {
+    return `Editing ${displayPath(firstChange.path, cwd)}`;
+  }
+
+  return 'Editing project files';
+}
+
+function displayPath(targetPath: string, cwd: string) {
+  const trimmed = targetPath.trim();
+  if (!trimmed) {
+    return 'the workspace';
+  }
+
+  if (!path.isAbsolute(trimmed)) {
+    return trimmed;
+  }
+
+  const relativePath = path.relative(cwd, trimmed);
+  if (!relativePath || relativePath.startsWith('..')) {
+    return 'a file outside the project';
+  }
+
+  return relativePath;
 }
 
 export async function decideWriteIntent(
@@ -761,6 +953,7 @@ export async function collectGitDiff(projectRoot: string): Promise<DiffSummary> 
   const changedFiles = statusLines
     .map((line) => line.slice(3).trim())
     .filter(Boolean);
+  const redactedFiles: string[] = [];
 
   const files: DiffSummary['files'] = [];
 
@@ -769,6 +962,11 @@ export async function collectGitDiff(projectRoot: string): Promise<DiffSummary> 
     const filePath = line.slice(3).trim();
 
     if (!filePath) {
+      continue;
+    }
+
+    if (await isProtectedWorkspacePath(projectRoot, filePath)) {
+      redactedFiles.push(filePath);
       continue;
     }
 
@@ -805,9 +1003,58 @@ export async function collectGitDiff(projectRoot: string): Promise<DiffSummary> 
 
   return {
     isGitRepo: true,
-    changedFiles,
-    files
+    changedFiles: changedFiles.filter((filePath) => !redactedFiles.includes(filePath)),
+    files,
+    ...(redactedFiles.length > 0 ? { redactedFiles } : {})
   };
+}
+
+export async function revertProtectedGitChanges(projectRoot: string, protectedPaths: string[]) {
+  const normalizedPaths = Array.from(
+    new Set(
+      protectedPaths
+        .map((value) => value.trim())
+        .filter(Boolean)
+    )
+  );
+  if (normalizedPaths.length === 0) {
+    return;
+  }
+
+  const statusEntries = new Map<string, string>();
+  for (const line of await readGitStatus(projectRoot)) {
+    const filePath = line.slice(3).trim();
+    if (filePath) {
+      statusEntries.set(filePath, line.slice(0, 2));
+    }
+  }
+
+  for (const filePath of normalizedPaths) {
+    const statusCode = statusEntries.get(filePath) ?? '';
+    if (statusCode === '??') {
+      await fs.rm(path.join(projectRoot, filePath), {
+        force: true,
+        recursive: true
+      });
+      continue;
+    }
+
+    try {
+      await execFileAsync(
+        'git',
+        ['-C', projectRoot, 'restore', '--source=HEAD', '--staged', '--worktree', '--', filePath],
+        {
+          timeout: 20000,
+          maxBuffer: 1024 * 1024
+        }
+      );
+    } catch {
+      await execFileAsync('git', ['-C', projectRoot, 'checkout', '--', filePath], {
+        timeout: 20000,
+        maxBuffer: 1024 * 1024
+      });
+    }
+  }
 }
 
 export async function executeApprovedWrite(

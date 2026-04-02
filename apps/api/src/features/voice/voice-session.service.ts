@@ -22,10 +22,11 @@ export class VoiceSessionService {
 
   async refreshAudioState() {
     const runtime = getRuntimeState();
+    const transcriptionConfig = await this.dependencies.voiceSettingsService.getResolvedTranscriptionConfig();
     setAudioState({
       available: process.platform === 'darwin',
       platform: process.platform,
-      transcriptionEngine: describeSttEngine(),
+      transcriptionEngine: describeSttEngine(transcriptionConfig.provider, transcriptionConfig.modelProfile),
       speechEngine: runtime.audio.speechEngine,
       error: process.platform === 'darwin' ? null : 'Desktop voice capture currently supports macOS only.'
     });
@@ -105,6 +106,27 @@ export class VoiceSessionService {
     return getRuntimeState().voiceSession;
   }
 
+  async enableBackgroundWarmup() {
+    await Promise.all([
+      this.dependencies.voiceTranscriptionService.enablePersistentWarmup(),
+      this.dependencies.ttsService.enablePersistentWarmup()
+    ]);
+
+    logger.info('voice.session.background_warmup.enabled');
+    return {
+      ok: true
+    };
+  }
+
+  disableBackgroundWarmup() {
+    this.dependencies.voiceTranscriptionService.disablePersistentWarmup();
+    this.dependencies.ttsService.disablePersistentWarmup();
+    logger.info('voice.session.background_warmup.disabled');
+    return {
+      ok: true
+    };
+  }
+
   interrupt() {
     const runtime = getRuntimeState();
 
@@ -142,18 +164,24 @@ export class VoiceSessionService {
   }
 }
 
-function describeSttEngine() {
+function describeSttEngine(
+  provider: 'whisper-local' | 'moonshine-local',
+  modelProfile: 'default' | 'multilingual-small' | 'moonshine-base' | 'moonshine-tiny'
+) {
   if (process.platform !== 'darwin') {
     return 'Unavailable';
   }
 
-  const provider = (process.env.STT_PROVIDER ?? 'none').trim();
-  if (provider === 'whisper-local') {
-    return 'Desktop media capture + whisper.cpp';
+  if (provider === 'moonshine-local') {
+    return modelProfile === 'moonshine-tiny'
+      ? 'Desktop media capture + Moonshine tiny'
+      : 'Desktop media capture + Moonshine base';
   }
 
-  if (provider === 'assemblyai') {
-    return 'Desktop media capture + AssemblyAI';
+  if (provider === 'whisper-local') {
+    return modelProfile === 'multilingual-small'
+      ? 'Desktop media capture + Whisper multilingual'
+      : 'Desktop media capture + whisper.cpp';
   }
 
   return 'Desktop media capture + STT provider';

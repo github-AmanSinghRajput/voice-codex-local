@@ -1,0 +1,21 @@
+<svg width="920" height="240" viewBox="0 0 920 240" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="vocodWordmarkGradient" x1="36" y1="44" x2="300" y2="220" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7C6BFF"/>
+      <stop offset="0.5" stop-color="#00E5FF"/>
+      <stop offset="1" stop-color="#6FFBBE"/>
+    </linearGradient>
+    <linearGradient id="vocodTextGradient" x1="334" y1="86" x2="840" y2="182" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F6FAFF"/>
+      <stop offset="1" stop-color="#B7C3D3"/>
+    </linearGradient>
+  </defs>
+  <rect x="12" y="12" width="280" height="216" rx="48" fill="#0D1116"/>
+  <path d="M44 120H78L94 84L114 172L132 48L152 156L170 102H236" stroke="url(#vocodWordmarkGradient)" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M200 76H248V96" stroke="url(#vocodWordmarkGradient)" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M200 164H248V144" stroke="url(#vocodWordmarkGradient)" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M196 120L218 98L196 76" stroke="url(#vocodWordmarkGradient)" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="332" y="156" fill="url(#vocodTextGradient)" font-family="Space Grotesk, Avenir Next, Arial, sans-serif" font-size="116" font-weight="700" letter-spacing="10">
+    VOCOD
+  </text>
+</svg>

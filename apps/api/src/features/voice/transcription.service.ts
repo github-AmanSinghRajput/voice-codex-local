@@ -1,7 +1,8 @@
 import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import crypto from 'node:crypto';
 import readline from 'node:readline';
 import { AppError } from '../../lib/errors.js';
 import { logger } from '../../lib/logger.js';
@@ -37,10 +38,13 @@ interface VoiceTranscriptionResult {
 }
 
 interface TranscriptionRuntimeConfig {
+  provider: 'whisper-local' | 'moonshine-local';
   modelPath: string;
   languageCode: string;
-  modelProfile: 'default' | 'multilingual-small';
+  modelProfile: 'default' | 'multilingual-small' | 'moonshine-base' | 'moonshine-tiny';
   multilingualAvailable: boolean;
+  moonshineModelName: string | null;
+  warnings?: string[];
 }
 
 interface SttProvider {
@@ -340,29 +344,244 @@ class WhisperWarmServerProvider implements SttProvider {
   }
 }
 
+interface MoonshineWorkerResponse {
+  id: string | null;
+  ok: boolean;
+  transcript?: string;
+  error?: string;
+  type?: string;
+}
+
+class MoonshineWarmWorkerProvider implements SttProvider {
+  readonly name = 'moonshine-local';
+
+  private worker: ChildProcessWithoutNullStreams | null = null;
+  private startupPromise: Promise<void> | null = null;
+  private readyPromise: Promise<void> | null = null;
+  private currentConfigKey: string | null = null;
+  private pending = new Map<
+    string,
+    {
+      resolve: (value: string) => void;
+      reject: (reason?: unknown) => void;
+    }
+  >();
+
+  async initialize(config?: TranscriptionRuntimeConfig) {
+    if (!config || !config.moonshineModelName) {
+      throw new Error('Moonshine runtime config is required for initialization.');
+    }
+
+    await this.ensureWorker(config);
+  }
+
+  async shutdown() {
+    if (this.worker && !this.worker.killed) {
+      this.worker.kill('SIGTERM');
+    }
+    this.worker = null;
+    this.startupPromise = null;
+    this.readyPromise = null;
+    this.currentConfigKey = null;
+  }
+
+  async transcribe(buffer: Buffer, mimeType: string, config?: TranscriptionRuntimeConfig) {
+    if (!config || !config.moonshineModelName) {
+      throw new Error('Moonshine runtime config is required for transcription.');
+    }
+
+    await this.ensureWorker(config);
+    const worker = this.worker;
+    if (!worker || !worker.stdin) {
+      throw new Error('Moonshine worker is unavailable.');
+    }
+
+    const extension = inferAudioExtension(mimeType);
+    const tempFilePath = path.join(os.tmpdir(), `vocod-moonshine-${crypto.randomUUID()}${extension}`);
+    await fs.writeFile(tempFilePath, buffer);
+
+    try {
+      const requestId = crypto.randomUUID();
+
+      const modelName = config.moonshineModelName;
+      return await new Promise<string>((resolve, reject) => {
+        this.pending.set(requestId, { resolve, reject });
+        worker.stdin.write(
+          `${JSON.stringify({
+            id: requestId,
+            audio_path: tempFilePath,
+            model: modelName
+          })}\n`
+        );
+      });
+    } finally {
+      await fs.rm(tempFilePath, { force: true });
+    }
+  }
+
+  private ensureWorker(config: TranscriptionRuntimeConfig) {
+    const nextConfigKey = JSON.stringify({
+      moonshineModelName: config.moonshineModelName
+    });
+
+    if (this.worker && this.currentConfigKey && this.currentConfigKey !== nextConfigKey) {
+      const restartPromise = this.shutdown().then(() => this.startWorker(config, nextConfigKey));
+      this.startupPromise = restartPromise.catch((error) => {
+        this.startupPromise = null;
+        throw error;
+      });
+      return this.startupPromise;
+    }
+
+    if (this.startupPromise) {
+      return this.startupPromise;
+    }
+
+    this.startupPromise = this.startWorker(config, nextConfigKey).catch((error) => {
+      this.startupPromise = null;
+      throw error;
+    });
+    return this.startupPromise;
+  }
+
+  private async startWorker(config: TranscriptionRuntimeConfig, configKey: string) {
+    const modelName = config.moonshineModelName ?? env.moonshineModel;
+    logger.info('voice.transcription.moonshine_worker.starting', {
+      model: modelName
+    });
+
+    const child = spawn('/bin/zsh', ['-lc', env.moonshineWorkerCommand], {
+      env: {
+        ...process.env,
+        MOONSHINE_MODEL: modelName
+      },
+      stdio: ['pipe', 'pipe', 'pipe']
+    }) as ChildProcessWithoutNullStreams;
+
+    this.worker = child;
+    this.readyPromise = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('Moonshine worker did not become ready in time.'));
+      }, 45_000);
+
+      const onReady = () => {
+        clearTimeout(timeout);
+        resolve();
+      };
+
+      const onError = (error: Error) => {
+        clearTimeout(timeout);
+        reject(error);
+      };
+
+      child.once('error', onError);
+
+      const output = readline.createInterface({ input: child.stdout });
+      output.on('line', (line) => {
+        let payload: MoonshineWorkerResponse;
+        try {
+          payload = JSON.parse(line) as MoonshineWorkerResponse;
+        } catch {
+          logger.warn('voice.transcription.moonshine_worker.stdout.unparsed', { line });
+          return;
+        }
+
+        if (payload.type === 'ready') {
+          child.removeListener('error', onError);
+          logger.info('voice.transcription.moonshine_worker.ready', {
+            model: modelName
+          });
+          onReady();
+          return;
+        }
+
+        if (!payload.id) {
+          return;
+        }
+
+        const pending = this.pending.get(payload.id);
+        if (!pending) {
+          return;
+        }
+
+        this.pending.delete(payload.id);
+
+        if (!payload.ok) {
+          pending.reject(new Error(payload.error ?? 'Moonshine transcription failed.'));
+          return;
+        }
+
+        pending.resolve(payload.transcript?.trim() ?? '');
+      });
+    });
+
+    const errorOutput = readline.createInterface({ input: child.stderr });
+    errorOutput.on('line', (line) => {
+      logger.warn('voice.transcription.moonshine_worker.stderr', { line });
+    });
+
+    child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
+      logger.warn('voice.transcription.moonshine_worker.closed', {
+        code,
+        signal
+      });
+
+      for (const pending of this.pending.values()) {
+        pending.reject(new Error('Moonshine worker closed before completing transcription.'));
+      }
+
+      this.pending.clear();
+      this.worker = null;
+      this.startupPromise = null;
+      this.readyPromise = null;
+      this.currentConfigKey = null;
+    });
+
+    await this.readyPromise;
+    this.currentConfigKey = configKey;
+  }
+}
+
 export class VoiceTranscriptionService {
-  private readonly primaryProvider = this.createPrimaryProvider();
-  private readonly fallbackProvider = this.createFallbackProvider();
+  private readonly providers = this.createProviders();
   private readonly voiceSettingsService = new VoiceSettingsService();
   private cooldownTimer: NodeJS.Timeout | null = null;
   private activeRequests = 0;
+  private persistentWarmup = false;
 
   async initialize() {}
 
   async shutdown() {
+    this.persistentWarmup = false;
     this.clearCooldownTimer();
     await this.shutdownProviders('service_shutdown');
   }
 
   async warmup() {
-    if (!this.primaryProvider) {
-      return;
-    }
-
     this.clearCooldownTimer();
     const config = await this.voiceSettingsService.getResolvedTranscriptionConfig();
-    await this.primaryProvider.initialize(config);
+    const primaryProvider = this.getPrimaryProvider(config);
+    if (!primaryProvider) {
+      return;
+    }
+    await primaryProvider.initialize(config);
     this.scheduleCooldown('warmup');
+  }
+
+  async enablePersistentWarmup() {
+    this.persistentWarmup = true;
+    this.clearCooldownTimer();
+    const config = await this.voiceSettingsService.getResolvedTranscriptionConfig();
+    const primaryProvider = this.getPrimaryProvider(config);
+    if (!primaryProvider) {
+      return;
+    }
+    await primaryProvider.initialize(config);
+  }
+
+  disablePersistentWarmup() {
+    this.persistentWarmup = false;
+    this.scheduleCooldown('persistent_release');
   }
 
   beginIdleCooldown() {
@@ -374,7 +593,9 @@ export class VoiceTranscriptionService {
       throw new AppError(400, 'Voice audio payload was empty.', 'VOICE_AUDIO_EMPTY');
     }
 
-    if (!this.primaryProvider) {
+    const transcriptionConfig = await this.voiceSettingsService.getResolvedTranscriptionConfig();
+    const primaryProvider = this.getPrimaryProvider(transcriptionConfig);
+    if (!primaryProvider) {
       throw new AppError(
         503,
         'Speech transcription provider is not configured.',
@@ -384,53 +605,53 @@ export class VoiceTranscriptionService {
 
     this.clearCooldownTimer();
     this.activeRequests += 1;
-    const transcriptionConfig = await this.voiceSettingsService.getResolvedTranscriptionConfig();
     const warnings: string[] = [...(transcriptionConfig.warnings ?? [])];
+    const fallbackProvider = this.getFallbackProvider(primaryProvider.name);
 
     try {
       logger.info('voice.transcription.primary.started', {
-        provider: this.primaryProvider.name,
+        provider: primaryProvider.name,
         languageCode: transcriptionConfig.languageCode,
         modelProfile: transcriptionConfig.modelProfile,
         bytes: buffer.length,
         mimeType
       });
-      const transcript = await this.primaryProvider.transcribe(buffer, mimeType, transcriptionConfig);
+      const transcript = await primaryProvider.transcribe(buffer, mimeType, transcriptionConfig);
       logger.info('voice.transcription.primary.completed', {
-        provider: this.primaryProvider.name,
+        provider: primaryProvider.name,
         transcriptLength: transcript.length
       });
-      return this.buildResult(this.primaryProvider.name, transcript, false, warnings);
+      return this.buildResult(primaryProvider.name, transcript, false, warnings);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown transcription failure.';
       logger.error('voice.transcription.primary.failed', {
-        provider: this.primaryProvider.name,
+        provider: primaryProvider.name,
         error: message
       });
 
-      if (!this.fallbackProvider || this.fallbackProvider.name === this.primaryProvider.name) {
+      if (!fallbackProvider || fallbackProvider.name === primaryProvider.name) {
         throw error;
       }
 
       warnings.push(`Primary STT provider failed: ${message}`);
       logger.warn('voice.transcription.fallback.started', {
-        primaryProvider: this.primaryProvider.name,
-        fallbackProvider: this.fallbackProvider.name,
+        primaryProvider: primaryProvider.name,
+        fallbackProvider: fallbackProvider.name,
         reason: message
       });
 
       try {
-        const transcript = await this.fallbackProvider.transcribe(buffer, mimeType, transcriptionConfig);
+        const transcript = await fallbackProvider.transcribe(buffer, mimeType, transcriptionConfig);
         logger.info('voice.transcription.fallback.completed', {
-          fallbackProvider: this.fallbackProvider.name,
+          fallbackProvider: fallbackProvider.name,
           transcriptLength: transcript.length
         });
-        return this.buildResult(this.fallbackProvider.name, transcript, true, warnings);
+        return this.buildResult(fallbackProvider.name, transcript, true, warnings);
       } catch (fallbackError) {
         const fallbackMessage =
           fallbackError instanceof Error ? fallbackError.message : 'Unknown fallback failure.';
         logger.error('voice.transcription.fallback.failed', {
-          fallbackProvider: this.fallbackProvider.name,
+          fallbackProvider: fallbackProvider.name,
           error: fallbackMessage
         });
         warnings.push(`Fallback STT provider failed: ${fallbackMessage}`);
@@ -470,21 +691,49 @@ export class VoiceTranscriptionService {
     };
   }
 
-  private createPrimaryProvider(): SttProvider | null {
-    if (env.sttProvider === 'whisper-local') {
-      return new WhisperWarmServerProvider();
+  private createProviders() {
+    return {
+      assemblyai: new AssemblyAiSttProvider(),
+      'whisper-local': new WhisperWarmServerProvider(),
+      'moonshine-local': new MoonshineWarmWorkerProvider()
+    } satisfies Record<'assemblyai' | 'whisper-local' | 'moonshine-local', SttProvider>;
+  }
+
+  private getPrimaryProvider(config: TranscriptionRuntimeConfig): SttProvider | null {
+    if (config.provider === 'moonshine-local' && env.moonshineWorkerCommand) {
+      return this.providers['moonshine-local'];
+    }
+
+    if (config.provider === 'whisper-local' && env.whisperModelPath) {
+      return this.providers['whisper-local'];
     }
 
     if (env.sttProvider === 'assemblyai') {
-      return new AssemblyAiSttProvider();
+      return this.providers.assemblyai;
     }
 
     return null;
   }
 
-  private createFallbackProvider(): SttProvider | null {
+  private getFallbackProvider(primaryProviderName: string): SttProvider | null {
+    if (primaryProviderName === 'moonshine-local' && env.whisperModelPath) {
+      return this.providers['whisper-local'];
+    }
+
+    if (primaryProviderName === 'whisper-local' && env.moonshineWorkerCommand && env.sttFallbackProvider === 'moonshine-local') {
+      return this.providers['moonshine-local'];
+    }
+
+    if (env.sttFallbackProvider === 'whisper-local' && env.whisperModelPath) {
+      return this.providers['whisper-local'];
+    }
+
+    if (env.sttFallbackProvider === 'moonshine-local' && env.moonshineWorkerCommand) {
+      return this.providers['moonshine-local'];
+    }
+
     if (env.sttFallbackProvider === 'assemblyai') {
-      return new AssemblyAiSttProvider();
+      return this.providers.assemblyai;
     }
 
     return null;
@@ -498,7 +747,7 @@ export class VoiceTranscriptionService {
   }
 
   private scheduleCooldown(reason: string) {
-    if (!this.primaryProvider) {
+    if (this.persistentWarmup) {
       return;
     }
 
@@ -520,16 +769,12 @@ export class VoiceTranscriptionService {
   }
 
   private async shutdownProviders(reason: string) {
-    if (this.primaryProvider) {
+    for (const provider of Object.values(this.providers)) {
       logger.info('voice.transcription.provider.cooldown', {
-        provider: this.primaryProvider.name,
+        provider: provider.name,
         reason
       });
-      await this.primaryProvider.shutdown();
-    }
-
-    if (this.fallbackProvider && this.fallbackProvider.name !== this.primaryProvider?.name) {
-      await this.fallbackProvider.shutdown();
+      await provider.shutdown();
     }
   }
 }

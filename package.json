@@ -12,7 +12,17 @@
     "build": "npm run build --workspace @voice-codex/api && npm run build --workspace @voice-codex/web && npm run build --workspace @voice-codex/desktop",
     "start": "concurrently -n api,web -c blue,green \"npm run start --workspace @voice-codex/api\" \"npm run preview --workspace @voice-codex/web\""
   },
+  "overrides": {
+    "express": {
+      "path-to-regexp": "0.1.13"
+    },
+    "vite": {
+      "picomatch": "4.0.4"
+    }
+  },
   "devDependencies": {
-    "concurrently": "^9.2.1"
+    "concurrently": "^9.2.1",
+    "path-to-regexp": "^0.1.13",
+    "picomatch": "^4.0.4"
   }
 }

@@ -1,32 +1,38 @@
 import type { WorkspaceState } from '../lib/types';
 
 interface WorkspaceScreenProps {
+  activeProviderName: string;
   projectInput: string;
   workspace: WorkspaceState | null;
   canBrowseProjectFolder: boolean;
+  isResetting: boolean;
   onProjectInputChange: (value: string) => void;
   onBrowseProjectFolder: () => void;
   onSaveProject: () => void;
   onToggleWriteAccess: (enabled: boolean) => void;
+  onResetApp: () => void;
 }
 
 export function WorkspaceScreen({
+  activeProviderName,
   projectInput,
   workspace,
   canBrowseProjectFolder,
+  isResetting,
   onProjectInputChange,
   onBrowseProjectFolder,
   onSaveProject,
-  onToggleWriteAccess
+  onToggleWriteAccess,
+  onResetApp
 }: WorkspaceScreenProps) {
   return (
     <section className="screen workspace-screen">
       <div className="section-head">
         <div>
           <p className="section-kicker">Workspace</p>
-          <h2>Choose the folder Codex is allowed to work inside.</h2>
+          <h2>Choose the folder {activeProviderName} is allowed to work inside.</h2>
           <p>
-            Until you select a folder, Codex can chat with you but should not inspect project files.
+            Until you select a folder, {activeProviderName} can chat with you but should not inspect project files.
           </p>
         </div>
         <div className="section-chip-group">
@@ -80,7 +86,7 @@ export function WorkspaceScreen({
           <article className="metric-card">
             <span className="metric-label">Connected folder</span>
             <strong>{workspace?.projectRoot ?? 'No folder connected yet'}</strong>
-            <p>Once selected, Codex should stay scoped to this folder only.</p>
+            <p>Once selected, {activeProviderName} should stay scoped to this folder only.</p>
           </article>
           <article className="metric-card">
             <span className="metric-label">Protected secrets</span>
@@ -94,6 +100,23 @@ export function WorkspaceScreen({
           </article>
         </section>
       </div>
+
+      <section className="content-card workspace-danger-zone">
+        <div className="workspace-danger-copy">
+          <span className="warning-ribbon">Warning</span>
+          <div>
+            <h3>Reset VOCOD</h3>
+            <p>
+              This clears chat history, notes, approvals, saved workspace, voice settings, app preferences, and
+              app-level provider connections. It does not run system-wide Codex or Claude logout commands.
+            </p>
+          </div>
+        </div>
+
+        <button className="button-secondary danger" disabled={isResetting} onClick={onResetApp} type="button">
+          {isResetting ? 'Resetting…' : 'Reset everything'}
+        </button>
+      </section>
     </section>
   );
 }

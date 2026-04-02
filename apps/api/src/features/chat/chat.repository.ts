@@ -61,7 +61,7 @@ export class ChatRepository {
             INSERT INTO conversation_messages (id, session_id, role, source, content, created_at)
             VALUES ($1, $2, $3, $4, $5, $6)
           `,
-          [message.id, session.id, message.role, message.source, message.text, message.createdAt]
+          [message.id, session.id, message.role, message.source, message.text || '', message.createdAt]
         );
       }
     });

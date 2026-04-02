@@ -29,6 +29,7 @@
   --danger-soft: rgba(255, 142, 152, 0.12);
   --shadow: none;
   --radius-panel: 22px;
+  --radius-sm: 12px;
   --radius-control: 16px;
   --radius-pill: 999px;
   --radius-shell: 26px;
@@ -3083,14 +3084,8 @@ select {
   color: var(--muted);
   font-size: 0.72rem;
   font-family: 'JetBrains Mono', monospace;
-  cursor: pointer;
   width: 100%;
   grid-column: 1 / -1;
-  transition: background 0.1s;
-}
-
-.diff-collapsed-separator:hover {
-  background: rgba(255, 255, 255, 0.05);
 }
 
 .diff-collapsed-icon {

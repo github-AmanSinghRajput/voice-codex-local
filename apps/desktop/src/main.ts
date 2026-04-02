@@ -1,8 +1,8 @@
 import path from 'node:path';
 import process from 'node:process';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import { accessSync, constants as fsConstants } from 'node:fs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { accessSync, constants as fsConstants, realpathSync, statSync } from 'node:fs';
 import {
   app,
   BrowserWindow,
@@ -13,11 +13,15 @@ import {
   type OpenDialogOptions
 } from 'electron';
 import * as pty from 'node-pty';
+import { resolveLocalApiAuthToken } from './local-api-auth.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const isDevelopment = !app.isPackaged;
 const apiBaseUrl = process.env.ELECTRON_API_BASE_URL ?? 'http://127.0.0.1:8787';
+const rendererUrl = process.env.ELECTRON_RENDERER_URL ?? 'http://localhost:5173';
+const trustedDevOrigin = new URL(rendererUrl).origin;
+const packagedRendererUrl = pathToFileURL(path.join(__dirname, '../../web/dist/index.html')).toString();
 const openDevTools = process.env.ELECTRON_OPEN_DEVTOOLS === 'true';
 
 type ApiOwner = 'electron' | 'external' | 'none';
@@ -51,6 +55,40 @@ let runtimeStatus: DesktopRuntimeStatus = {
 const ptyProcesses = new Map<string, pty.IPty>();
 let ptyIdCounter = 0;
 
+function isTrustedRendererUrl(url: string) {
+  if (!url) {
+    return false;
+  }
+
+  if (isDevelopment) {
+    return url.startsWith(trustedDevOrigin);
+  }
+
+  return url === packagedRendererUrl;
+}
+
+function assertTrustedSender(senderUrl: string) {
+  if (!isTrustedRendererUrl(senderUrl)) {
+    throw new Error('Untrusted renderer origin.');
+  }
+}
+
+function getSenderUrl(event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent) {
+  return event.senderFrame?.url ?? event.sender.getURL();
+}
+
+function isTrustedMediaOrigin(originOrUrl: string) {
+  if (!originOrUrl) {
+    return false;
+  }
+
+  if (isDevelopment) {
+    return originOrUrl.startsWith(trustedDevOrigin);
+  }
+
+  return originOrUrl.startsWith('file://');
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1480,
@@ -58,12 +96,13 @@ function createWindow() {
     minWidth: 1200,
     minHeight: 760,
     backgroundColor: '#0b0d11',
-    title: 'Voice Codex Local',
+    title: 'VOCOD',
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      sandbox: true
     }
   });
 
@@ -71,9 +110,17 @@ function createWindow() {
     void shell.openExternal(url);
     return { action: 'deny' };
   });
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (!isTrustedRendererUrl(url)) {
+      event.preventDefault();
+    }
+  });
+  mainWindow.webContents.on('did-finish-load', () => {
+    mainWindow?.webContents.setZoomFactor(1);
+  });
 
   if (isDevelopment) {
-    void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL ?? 'http://localhost:5173');
+    void mainWindow.loadURL(rendererUrl);
     if (openDevTools) {
       mainWindow.webContents.openDevTools({ mode: 'detach' });
     }
@@ -178,7 +225,9 @@ async function ensureLocalApi() {
     cwd: path.join(__dirname, '../../..'),
     stdio: 'ignore',
     env: {
-      ...process.env
+      ...process.env,
+      API_HOST: '127.0.0.1',
+      LOCAL_API_AUTH_TOKEN: process.env.LOCAL_API_AUTH_TOKEN ?? ''
     }
   });
   apiProcessOwnedByElectron = true;
@@ -261,16 +310,41 @@ function ensurePtySpawnHelper() {
   }
 }
 
+function resolveValidatedPtyCwd(inputCwd?: string) {
+  const homeDir = realpathSync(process.env.HOME ?? '/');
+  const resolvedCwd = path.resolve(inputCwd ?? homeDir);
+  const realCwd = realpathSync(resolvedCwd);
+  const relativeToHome = path.relative(homeDir, realCwd);
+
+  if (relativeToHome === '..' || relativeToHome.startsWith(`..${path.sep}`)) {
+    throw new Error('Terminal session cwd must stay inside your home directory.');
+  }
+
+  if (!statSync(realCwd).isDirectory()) {
+    throw new Error('Terminal session cwd must be a directory.');
+  }
+
+  return realCwd;
+}
+
+function normalizePtySize(value: number | undefined, fallback: number, min: number, max: number) {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+
+  return Math.max(min, Math.min(max, Math.round(value!)));
+}
+
 function createPtySession(config: { cwd?: string; cols?: number; rows?: number }): string {
   const id = `pty-${++ptyIdCounter}`;
   ensurePtySpawnHelper();
   const shellPath = resolveShellPath();
-  const resolvedCwd = config.cwd ?? process.env.HOME ?? '/';
+  const resolvedCwd = resolveValidatedPtyCwd(config.cwd);
 
   const term = pty.spawn(shellPath, ['-l'], {
     name: 'xterm-256color',
-    cols: config.cols ?? 120,
-    rows: config.rows ?? 30,
+    cols: normalizePtySize(config.cols, 120, 48, 220),
+    rows: normalizePtySize(config.rows, 30, 12, 80),
     cwd: resolvedCwd,
     env: {
       ...process.env,
@@ -332,11 +406,13 @@ function killAllPtySessions() {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  process.env.LOCAL_API_AUTH_TOKEN = await resolveLocalApiAuthToken(process.env.LOCAL_API_AUTH_TOKEN);
+
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
     if (
       permission === 'media' &&
-      webContents.getURL().startsWith('http://localhost:5173')
+      isTrustedMediaOrigin(webContents.getURL())
     ) {
       callback(true);
       return;
@@ -348,7 +424,7 @@ app.whenReady().then(() => {
   session.defaultSession.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
     if (
       permission === 'media' &&
-      requestingOrigin.startsWith('http://localhost:5173')
+      isTrustedMediaOrigin(requestingOrigin)
     ) {
       return true;
     }
@@ -356,8 +432,12 @@ app.whenReady().then(() => {
     return false;
   });
 
-  ipcMain.handle('desktop:get-runtime-status', async () => getRuntimeStatus());
-  ipcMain.handle('desktop:pick-project-folder', async () => {
+  ipcMain.handle('desktop:get-runtime-status', async (event) => {
+    assertTrustedSender(getSenderUrl(event));
+    return getRuntimeStatus();
+  });
+  ipcMain.handle('desktop:pick-project-folder', async (event) => {
+    assertTrustedSender(getSenderUrl(event));
     const targetWindow = mainWindow ?? BrowserWindow.getFocusedWindow();
     const dialogOptions: OpenDialogOptions = {
       title: 'Choose project folder',
@@ -375,7 +455,8 @@ app.whenReady().then(() => {
   });
   ipcMain.handle(
     'desktop:pty-create',
-    (_event, config: { cwd?: string; cols?: number; rows?: number }) => {
+    (event, config: { cwd?: string; cols?: number; rows?: number }) => {
+      assertTrustedSender(getSenderUrl(event));
       try {
         return createPtySession(config);
       } catch (err) {
@@ -387,17 +468,30 @@ app.whenReady().then(() => {
   );
   ipcMain.on(
     'desktop:pty-write',
-    (_event, payload: { id: string; data: string }) => {
-      writePty(payload.id, payload.data);
+    (event, payload: { id: string; data: string }) => {
+      assertTrustedSender(getSenderUrl(event));
+      if (typeof payload?.id !== 'string' || typeof payload?.data !== 'string') {
+        return;
+      }
+      writePty(payload.id, payload.data.slice(0, 8192));
     }
   );
   ipcMain.on(
     'desktop:pty-resize',
-    (_event, payload: { id: string; cols: number; rows: number }) => {
-      resizePty(payload.id, payload.cols, payload.rows);
+    (event, payload: { id: string; cols: number; rows: number }) => {
+      assertTrustedSender(getSenderUrl(event));
+      if (typeof payload?.id !== 'string') {
+        return;
+      }
+      resizePty(
+        payload.id,
+        normalizePtySize(payload.cols, 120, 48, 220),
+        normalizePtySize(payload.rows, 30, 12, 80)
+      );
     }
   );
-  ipcMain.handle('desktop:pty-kill', (_event, id: string) => {
+  ipcMain.handle('desktop:pty-kill', (event, id: string) => {
+    assertTrustedSender(getSenderUrl(event));
     killPty(id);
     return true;
   });

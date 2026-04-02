@@ -1,5 +1,6 @@
 import { navigationItems } from '../lib/constants';
 import type { ScreenId } from '../lib/types';
+import { BrandLogo } from './BrandLogo';
 
 interface SidebarNavProps {
   activeScreen: ScreenId;
@@ -19,11 +20,7 @@ export function SidebarNav({ activeScreen, hints, onSelect }: SidebarNavProps) {
   return (
     <aside className="shell-sidebar">
       <div className="shell-brand">
-        <span className="shell-brand-mark">VC</span>
-        <div>
-          <p>Voice Codex</p>
-          <span>Desktop workspace</span>
-        </div>
+        <BrandLogo compact subtitle="Desktop runtime" />
       </div>
 
       <nav className="shell-nav" aria-label="Primary">

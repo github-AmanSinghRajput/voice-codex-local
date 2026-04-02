@@ -26,7 +26,13 @@ function assertOneOf(value: string, fieldName: string, validValues: string[]) {
 export const env = {
   appEnv: process.env.APP_ENV ?? 'development',
   port: getNumber(process.env.API_PORT, 8787),
+  host: process.env.API_HOST?.trim() || '127.0.0.1',
   allowedOrigin: process.env.CORS_ORIGIN ?? 'http://localhost:5173',
+  allowedWorkspaceRoots: (process.env.ALLOWED_WORKSPACE_ROOTS ?? '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean),
+  localApiAuthToken: process.env.LOCAL_API_AUTH_TOKEN?.trim() || '',
   voiceLocale: process.env.VOICE_LOCALE ?? 'en-US',
   codexModel: process.env.CODEX_MODEL?.trim() || '',
   codexReasoningEffort: process.env.CODEX_REASONING_EFFORT?.trim() || '',
@@ -35,13 +41,15 @@ export const env = {
   whisperModelPath: process.env.WHISPER_MODEL_PATH?.trim() || '',
   whisperMultilingualModelPath: process.env.WHISPER_MULTILINGUAL_MODEL_PATH?.trim() || '',
   whisperServerPort: getNumber(process.env.WHISPER_SERVER_PORT, 8791),
+  moonshineWorkerCommand: process.env.MOONSHINE_WORKER_COMMAND?.trim() || '',
+  moonshineModel: process.env.MOONSHINE_MODEL?.trim() || 'moonshine/base',
   assemblyAiApiKey: process.env.ASSEMBLYAI_API_KEY?.trim() || '',
   transcriptionLanguageCode: process.env.TRANSCRIPTION_LANGUAGE_CODE?.trim() || 'en',
   transcriptionSpeakerLabels: getBoolean(process.env.ASSEMBLYAI_SPEAKER_DIARIZATION, false),
   ttsProvider: process.env.TTS_PROVIDER ?? 'none',
   kokoroCommand: process.env.KOKORO_COMMAND?.trim() || '',
   kokoroWorkerCommand: process.env.KOKORO_WORKER_COMMAND?.trim() || '',
-  kokoroVoice: process.env.KOKORO_VOICE?.trim() || 'af_heart',
+  kokoroVoice: process.env.KOKORO_VOICE?.trim() || 'am_michael',
   kokoroLangCode: process.env.KOKORO_LANG_CODE?.trim() || 'a',
   kokoroSpeed: getNumber(process.env.KOKORO_SPEED, 1),
   databaseUrl: process.env.DATABASE_URL?.trim() || '',
@@ -76,6 +84,10 @@ export function validateEnv() {
     throw new Error(`API_PORT must be a positive number. Received: ${env.port}`);
   }
 
+  if (!env.host.trim()) {
+    throw new Error('API_HOST must not be empty.');
+  }
+
   if (env.kokoroSpeed <= 0) {
     throw new Error(`KOKORO_SPEED must be a positive number. Received: ${env.kokoroSpeed}`);
   }
@@ -85,8 +97,8 @@ export function validateEnv() {
   }
 
   assertOneOf(env.queueProvider, 'QUEUE_PROVIDER', providerValues);
-  assertOneOf(env.sttProvider, 'STT_PROVIDER', ['none', 'assemblyai', 'whisper-local']);
-  assertOneOf(env.sttFallbackProvider, 'STT_FALLBACK_PROVIDER', ['none', 'assemblyai']);
+  assertOneOf(env.sttProvider, 'STT_PROVIDER', ['none', 'assemblyai', 'whisper-local', 'moonshine-local']);
+  assertOneOf(env.sttFallbackProvider, 'STT_FALLBACK_PROVIDER', ['none', 'assemblyai', 'whisper-local', 'moonshine-local']);
   assertOneOf(env.ttsProvider, 'TTS_PROVIDER', ['none', 'kokoro', 'piper']);
   assertOneOf(env.emailProvider, 'EMAIL_PROVIDER', ['none', 'resend', 'sendgrid']);
   assertOneOf(env.vectorProvider, 'VECTOR_PROVIDER', integrationValues);
@@ -105,12 +117,24 @@ export function validateEnv() {
     throw new Error('WHISPER_MODEL_PATH is required when STT_PROVIDER=whisper-local.');
   }
 
+  if (env.sttProvider === 'moonshine-local' && !env.moonshineWorkerCommand) {
+    throw new Error('MOONSHINE_WORKER_COMMAND is required when STT_PROVIDER=moonshine-local.');
+  }
+
   if (env.whisperServerPort <= 0) {
     throw new Error(`WHISPER_SERVER_PORT must be a positive number. Received: ${env.whisperServerPort}`);
   }
 
   if (env.sttFallbackProvider === 'assemblyai' && !env.assemblyAiApiKey) {
     throw new Error('ASSEMBLYAI_API_KEY is required when STT_FALLBACK_PROVIDER=assemblyai.');
+  }
+
+  if (env.sttFallbackProvider === 'whisper-local' && !env.whisperModelPath) {
+    throw new Error('WHISPER_MODEL_PATH is required when STT_FALLBACK_PROVIDER=whisper-local.');
+  }
+
+  if (env.sttFallbackProvider === 'moonshine-local' && !env.moonshineWorkerCommand) {
+    throw new Error('MOONSHINE_WORKER_COMMAND is required when STT_FALLBACK_PROVIDER=moonshine-local.');
   }
 
   if (env.ttsProvider === 'kokoro' && !env.kokoroWorkerCommand) {

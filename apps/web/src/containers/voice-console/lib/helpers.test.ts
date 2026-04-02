@@ -11,11 +11,54 @@ import type { MessageEntry, StatusResponse } from './types';
 
 function createStatus(overrides: Partial<StatusResponse> = {}): StatusResponse {
   return {
+    appSettings: {
+      displayName: 'Aman',
+      theme: 'dark',
+      welcomedAt: new Date().toISOString()
+    },
     codexStatus: {
       installed: true,
       loggedIn: true,
       authMode: 'ChatGPT',
       statusText: 'Logged in'
+    },
+    assistantProviders: {
+      activeProviderId: 'codex',
+      activeProvider: {
+        id: 'codex',
+        name: 'OpenAI Codex',
+        installed: true,
+        loggedIn: true,
+        appConnected: true,
+        connectedAt: new Date().toISOString(),
+        authMode: 'ChatGPT',
+        statusText: 'Logged in',
+        loginCommand: 'codex login --device-auth'
+      },
+      providers: [
+        {
+          id: 'codex',
+          name: 'OpenAI Codex',
+          installed: true,
+          loggedIn: true,
+          appConnected: true,
+          connectedAt: new Date().toISOString(),
+          authMode: 'ChatGPT',
+          statusText: 'Logged in',
+          loginCommand: 'codex login --device-auth'
+        },
+        {
+          id: 'claude',
+          name: 'Claude Code',
+          installed: true,
+          loggedIn: false,
+          appConnected: false,
+          connectedAt: null,
+          authMode: null,
+          statusText: 'Not logged in',
+          loginCommand: 'claude auth login'
+        }
+      ]
     },
     workspace: {
       id: 'workspace-1',
@@ -57,7 +100,7 @@ function createStatus(overrides: Partial<StatusResponse> = {}): StatusResponse {
   };
 }
 
-test('getSuggestedScreen returns workspace when Codex is not logged in', () => {
+test('getSuggestedScreen returns workspace when no assistant provider is logged in', () => {
   const result = getSuggestedScreen(
     createStatus({
       codexStatus: {
@@ -65,12 +108,94 @@ test('getSuggestedScreen returns workspace when Codex is not logged in', () => {
         loggedIn: false,
         authMode: null,
         statusText: 'Not logged in'
+      },
+      assistantProviders: {
+        activeProviderId: 'codex',
+        activeProvider: null,
+        providers: [
+          {
+            id: 'codex',
+            name: 'OpenAI Codex',
+            installed: true,
+            loggedIn: false,
+            appConnected: false,
+            connectedAt: null,
+            authMode: null,
+            statusText: 'Not logged in',
+            loginCommand: 'codex login --device-auth'
+          },
+          {
+            id: 'claude',
+            name: 'Claude Code',
+            installed: true,
+            loggedIn: false,
+            appConnected: false,
+            connectedAt: null,
+            authMode: null,
+            statusText: 'Not logged in',
+            loginCommand: 'claude auth login'
+          }
+        ]
       }
     }),
     'terminal'
   );
 
   assert.equal(result, 'workspace');
+});
+
+test('getSuggestedScreen respects Claude as the active logged-in provider', () => {
+  const result = getSuggestedScreen(
+    createStatus({
+      codexStatus: {
+        installed: true,
+        loggedIn: false,
+        authMode: null,
+        statusText: 'Not logged in'
+      },
+      assistantProviders: {
+        activeProviderId: 'claude',
+        activeProvider: {
+          id: 'claude',
+          name: 'Claude Code',
+          installed: true,
+          loggedIn: true,
+          appConnected: true,
+          connectedAt: new Date().toISOString(),
+          authMode: 'Anthropic',
+          statusText: 'Logged in',
+          loginCommand: 'claude auth login'
+        },
+        providers: [
+          {
+            id: 'codex',
+            name: 'OpenAI Codex',
+            installed: true,
+            loggedIn: false,
+            appConnected: false,
+            connectedAt: null,
+            authMode: null,
+            statusText: 'Not logged in',
+            loginCommand: 'codex login --device-auth'
+          },
+          {
+            id: 'claude',
+            name: 'Claude Code',
+            installed: true,
+            loggedIn: true,
+            appConnected: true,
+            connectedAt: new Date().toISOString(),
+            authMode: 'Anthropic',
+            statusText: 'Logged in',
+            loginCommand: 'claude auth login'
+          }
+        ]
+      }
+    }),
+    'terminal'
+  );
+
+  assert.equal(result, 'terminal');
 });
 
 test('getSuggestedScreen returns review when approval is pending', () => {
@@ -108,7 +233,7 @@ test('buildNavigationHints matches visible launch surfaces only', () => {
 
   assert.deepEqual(
     hints.map((hint) => hint.id),
-    ['workspace', 'voice', 'terminal', 'shell', 'review', 'notes', 'vibemusic']
+    ['workspace', 'voice', 'terminal', 'shell', 'review']
   );
   assert.equal(hints.find((hint) => hint.id === 'terminal')?.hint, '1 turns logged');
 });

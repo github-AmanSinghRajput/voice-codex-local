@@ -14,6 +14,8 @@ declare global {
     desktopShell?: {
       platform: string;
       isDesktop: true;
+      apiBaseUrl: string;
+      apiAuthToken: string | null;
       getRuntimeStatus: () => Promise<DesktopRuntimeStatus>;
       pickProjectFolder: () => Promise<string | null>;
       subscribeRuntimeStatus: (

@@ -19,7 +19,7 @@ export function computeTimeDomainRms(samples: Uint8Array) {
   return Math.sqrt(sumSquares / samples.length);
 }
 
-export function smoothRms(previous: number, next: number, factor = desktopVadConfig.smoothingFactor) {
+export function smoothRms(previous: number, next: number, factor: number = desktopVadConfig.smoothingFactor) {
   if (previous === 0) {
     return next;
   }

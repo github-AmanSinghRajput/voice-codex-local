@@ -3,9 +3,10 @@ import '@xterm/xterm/css/xterm.css';
 
 interface ShellScreenProps {
   cwd: string | null;
+  theme: 'dark' | 'light';
 }
 
-export function ShellScreen({ cwd }: ShellScreenProps) {
+export function ShellScreen({ cwd, theme }: ShellScreenProps) {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<unknown>(null);
   const fitAddonRef = useRef<unknown>(null);
@@ -44,28 +45,7 @@ export function ShellScreen({ cwd }: ShellScreenProps) {
         cursorBlink: true,
         fontSize: 13,
         fontFamily: "'JetBrains Mono', 'SF Mono', 'Menlo', monospace",
-        theme: {
-          background: '#0b0d11',
-          foreground: '#e0e6ed',
-          cursor: '#00e5ff',
-          selectionBackground: '#1e3a5f',
-          black: '#0b0d11',
-          red: '#ff5c57',
-          green: '#5af78e',
-          yellow: '#f3f99d',
-          blue: '#57c7ff',
-          magenta: '#ff6ac1',
-          cyan: '#9aedfe',
-          white: '#f1f1f0',
-          brightBlack: '#686868',
-          brightRed: '#ff5c57',
-          brightGreen: '#5af78e',
-          brightYellow: '#f3f99d',
-          brightBlue: '#57c7ff',
-          brightMagenta: '#ff6ac1',
-          brightCyan: '#9aedfe',
-          brightWhite: '#f1f1f0'
-        },
+        theme: getTerminalTheme(theme),
         allowProposedApi: true
       });
 
@@ -181,7 +161,14 @@ export function ShellScreen({ cwd }: ShellScreenProps) {
       terminalRef.current = null;
       fitAddonRef.current = null;
     };
-  }, []);
+  }, [cwd, theme]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current as { options?: { theme?: unknown } } | null;
+    if (terminal?.options) {
+      terminal.options.theme = getTerminalTheme(theme);
+    }
+  }, [theme]);
 
   if (error && !terminalRef.current) {
     return (
@@ -215,4 +202,54 @@ export function ShellScreen({ cwd }: ShellScreenProps) {
       <div className="shell-terminal-wrapper" ref={wrapperRef} />
     </section>
   );
+}
+
+function getTerminalTheme(theme: 'dark' | 'light') {
+  if (theme === 'light') {
+    return {
+      background: '#f7fbff',
+      foreground: '#1d2a38',
+      cursor: '#0b8ac2',
+      selectionBackground: '#cfe7f7',
+      black: '#dfe8f1',
+      red: '#c94961',
+      green: '#0a8f62',
+      yellow: '#a67712',
+      blue: '#0b8ac2',
+      magenta: '#9b4de0',
+      cyan: '#168f9d',
+      white: '#203041',
+      brightBlack: '#7a8998',
+      brightRed: '#d14b61',
+      brightGreen: '#0a8f62',
+      brightYellow: '#a67712',
+      brightBlue: '#0b8ac2',
+      brightMagenta: '#9b4de0',
+      brightCyan: '#168f9d',
+      brightWhite: '#13202d'
+    };
+  }
+
+  return {
+    background: '#0b0d11',
+    foreground: '#e0e6ed',
+    cursor: '#00e5ff',
+    selectionBackground: '#1e3a5f',
+    black: '#0b0d11',
+    red: '#ff5c57',
+    green: '#5af78e',
+    yellow: '#f3f99d',
+    blue: '#57c7ff',
+    magenta: '#ff6ac1',
+    cyan: '#9aedfe',
+    white: '#f1f1f0',
+    brightBlack: '#686868',
+    brightRed: '#ff5c57',
+    brightGreen: '#5af78e',
+    brightYellow: '#f3f99d',
+    brightBlue: '#57c7ff',
+    brightMagenta: '#ff6ac1',
+    brightCyan: '#9aedfe',
+    brightWhite: '#f1f1f0'
+  };
 }

@@ -242,6 +242,7 @@ export class TtsService {
   private readonly legacyOutputDir = path.join(process.cwd(), 'data', 'generated-audio');
   private cooldownTimer: NodeJS.Timeout | null = null;
   private activeRequests = 0;
+  private persistentWarmup = false;
 
   constructor() {
     this.provider = this.createProvider();
@@ -252,6 +253,7 @@ export class TtsService {
   }
 
   async shutdown() {
+    this.persistentWarmup = false;
     this.clearCooldownTimer();
     await this.provider.shutdown();
   }
@@ -260,6 +262,17 @@ export class TtsService {
     this.clearCooldownTimer();
     await this.provider.initialize();
     this.scheduleCooldown('warmup');
+  }
+
+  async enablePersistentWarmup() {
+    this.persistentWarmup = true;
+    this.clearCooldownTimer();
+    await this.provider.initialize();
+  }
+
+  disablePersistentWarmup() {
+    this.persistentWarmup = false;
+    this.scheduleCooldown('persistent_release');
   }
 
   beginIdleCooldown() {
@@ -305,6 +318,10 @@ export class TtsService {
   }
 
   private scheduleCooldown(reason: string) {
+    if (this.persistentWarmup) {
+      return;
+    }
+
     this.clearCooldownTimer();
     this.cooldownTimer = setTimeout(() => {
       this.cooldownTimer = null;

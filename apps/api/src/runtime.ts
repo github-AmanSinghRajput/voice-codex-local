@@ -3,7 +3,10 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { env } from './config/env.js';
+import { isSecretRelativePath } from './lib/path-security.js';
 import type {
+  AssistantProviderId,
   AudioBridgeState,
   DiffSummary,
   PendingApproval,
@@ -32,6 +35,7 @@ const secretPolicy = [
 ];
 
 const runtimeState: RuntimeState = {
+  activeProviderId: null,
   workspace: {
     id: null,
     projectRoot: null,
@@ -79,6 +83,21 @@ async function detectGitRepo(projectRoot: string) {
   }
 }
 
+function getAllowedWorkspaceRoots() {
+  const configuredRoots = env.allowedWorkspaceRoots.length > 0 ? env.allowedWorkspaceRoots : [process.env.HOME ?? ''];
+
+  return configuredRoots
+    .map((value) => path.resolve(value))
+    .filter(Boolean);
+}
+
+function isPathWithinAllowedRoots(resolvedPath: string, allowedRoots: string[]) {
+  return allowedRoots.some((allowedRoot) => {
+    const relative = path.relative(allowedRoot, resolvedPath);
+    return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..');
+  });
+}
+
 export async function validateProjectRoot(inputPath: string) {
   const resolved = path.resolve(inputPath.trim());
   if (!path.isAbsolute(resolved)) {
@@ -89,20 +108,38 @@ export async function validateProjectRoot(inputPath: string) {
     throw new Error('Select a specific project directory, not your filesystem root or home directory.');
   }
 
-  const stats = await fs.stat(resolved);
+  const realProjectRoot = await fs.realpath(resolved);
+  const allowedRoots = getAllowedWorkspaceRoots();
+  if (!isPathWithinAllowedRoots(realProjectRoot, allowedRoots)) {
+    throw new Error(
+      `Selected project must stay within an approved workspace root: ${allowedRoots.join(', ')}.`
+    );
+  }
+
+  const stats = await fs.stat(realProjectRoot);
   if (!stats.isDirectory()) {
     throw new Error('Selected project path is not a directory.');
   }
 
+  const isGitRepo = await detectGitRepo(realProjectRoot);
+  if (!isGitRepo) {
+    throw new Error('Selected project must be a Git repository.');
+  }
+
   return {
-    projectRoot: resolved,
-    projectName: getProjectName(resolved),
-    isGitRepo: await detectGitRepo(resolved)
+    projectRoot: realProjectRoot,
+    projectName: getProjectName(realProjectRoot),
+    isGitRepo
   };
 }
 
 export function getRuntimeState() {
   return runtimeState;
+}
+
+export function setActiveProviderId(activeProviderId: AssistantProviderId | null) {
+  runtimeState.activeProviderId = activeProviderId;
+  return runtimeState.activeProviderId;
 }
 
 export async function setProjectRoot(projectRoot: string) {
@@ -183,4 +220,8 @@ export function resetVoiceSessionState(phase: VoiceSessionPhase = 'idle') {
 
 export function getWorkspaceState(): WorkspaceState {
   return runtimeState.workspace;
+}
+
+export function shouldProtectWorkspacePath(relativePath: string) {
+  return isSecretRelativePath(relativePath);
 }

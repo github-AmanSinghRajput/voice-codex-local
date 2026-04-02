@@ -3,11 +3,13 @@ import cors from 'cors';
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import {
-  clearPendingApproval,
-  getRuntimeState,
-  setVoiceSessionState
-} from '../runtime.js';
-import { CodexClientError, getCodexStatus, initCodexClient, logoutCodex } from '../codex-client.js';
+  AssistantClientError,
+  connectAssistantProvider,
+  disconnectAssistantProvider,
+  getAssistantState,
+  initAssistantClient,
+  setActiveAssistantProvider
+} from '../assistant-client.js';
 import { env } from '../config/env.js';
 import { AuthService } from '../features/auth/auth.service.js';
 import { ApprovalRepository } from '../features/approvals/approval.repository.js';
@@ -28,13 +30,28 @@ import {
   requireTrimmedString
 } from '../lib/http.js';
 import { logger } from '../lib/logger.js';
+import { localApiAuthHeader, matchesLocalApiAuthToken } from '../lib/local-api-auth.js';
+import { isProtectedWorkspacePath } from '../lib/path-security.js';
 import { createRateLimitMiddleware } from '../lib/rate-limit.js';
 import { VoiceSessionService } from '../features/voice/voice-session.service.js';
 import { VoiceSettingsService } from '../features/voice/voice-settings.service.js';
 import { VoiceTranscriptionService } from '../features/voice/transcription.service.js';
 import { CodexSettingsService } from '../features/codex/codex-settings.service.js';
+import { ClaudeSettingsService } from '../features/claude/claude-settings.service.js';
+import { ProviderSettingsService } from '../features/providers/provider-settings.service.js';
 import { VoiceCommandService } from '../features/voice/voice-command.service.js';
-import type { ChatSource } from '../types.js';
+import { AppSettingsService } from '../features/app/app-settings.service.js';
+import { AppResetService } from '../features/app/app-reset.service.js';
+import type { AppTheme, AssistantProviderId, ChatSource } from '../types.js';
+import {
+  clearPendingApproval,
+  getRuntimeState,
+  resetVoiceSessionState,
+  setActiveProviderId,
+  setLastDiff,
+  setVoiceSessionState,
+  setWorkspaceState
+} from '../runtime.js';
 
 function getVoiceTurnId(request: Request) {
   return request.header('x-voice-turn-id')?.trim() || null;
@@ -44,7 +61,36 @@ function writeNdjson(response: Response, payload: Record<string, unknown>) {
   response.write(`${JSON.stringify(payload)}\n`);
 }
 
-export function createApp() {
+async function sanitizeDiffForResponse(
+  projectRoot: string | null,
+  diff: ReturnType<typeof getRuntimeState>['lastDiff']
+) {
+  if (!projectRoot || !diff) {
+    return diff;
+  }
+
+  const visibleFiles = [];
+  const redactedFiles = [...(diff.redactedFiles ?? [])];
+
+  for (const file of diff.files) {
+    if (await isProtectedWorkspacePath(projectRoot, file.filePath)) {
+      redactedFiles.push(file.filePath);
+      continue;
+    }
+
+    visibleFiles.push(file);
+  }
+
+  const changedFiles = diff.changedFiles.filter((filePath) => !redactedFiles.includes(filePath));
+  return {
+    ...diff,
+    changedFiles,
+    files: visibleFiles,
+    ...(redactedFiles.length > 0 ? { redactedFiles: Array.from(new Set(redactedFiles)) } : {})
+  };
+}
+
+export function createApp(options?: { apiAuthToken?: string }) {
   const app = express();
   const eventBus = new EventBus();
   const chatService = new ChatService();
@@ -56,8 +102,12 @@ export function createApp() {
   const workspaceService = new WorkspaceService();
   const ttsService = new TtsService();
   const codexSettingsService = new CodexSettingsService();
-  initCodexClient(codexSettingsService);
+  const claudeSettingsService = new ClaudeSettingsService();
+  const providerSettingsService = new ProviderSettingsService();
+  initAssistantClient(codexSettingsService, claudeSettingsService, providerSettingsService);
   const voiceSettingsService = new VoiceSettingsService();
+  const appSettingsService = new AppSettingsService();
+  const appResetService = new AppResetService();
   const voiceTranscriptionService = new VoiceTranscriptionService();
   const voiceCommandService = new VoiceCommandService(codexSettingsService);
   const voiceSessionService = new VoiceSessionService({
@@ -122,6 +172,24 @@ export function createApp() {
     })
   );
 
+  app.use('/api', (request: Request, _response: Response, next: NextFunction) => {
+    const expectedToken = options?.apiAuthToken?.trim();
+    if (!expectedToken) {
+      next();
+      return;
+    }
+
+    const candidate =
+      request.header(localApiAuthHeader)?.trim() || request.header('authorization')?.replace(/^Bearer\s+/i, '').trim();
+
+    if (!matchesLocalApiAuthToken(candidate, expectedToken)) {
+      next(new AppError(401, 'Local API authentication is required.', 'UNAUTHORIZED'));
+      return;
+    }
+
+    next();
+  });
+
   app.get(
     '/api/system',
     asyncHandler(async (_request: Request, response: Response) => {
@@ -137,16 +205,29 @@ export function createApp() {
     '/api/status',
     asyncHandler(async (_request: Request, response: Response) => {
       response.set('Cache-Control', 'no-store');
-      const codexStatus = await getCodexStatus();
-      await authService.syncCodexCliSession(codexStatus);
+      const assistantProviders = await getAssistantState();
+      const codexStatus =
+        assistantProviders.providers.find((provider) => provider.id === 'codex') ?? null;
+      const claudeStatus =
+        assistantProviders.providers.find((provider) => provider.id === 'claude') ?? null;
+      if (codexStatus) {
+        await authService.syncCliSession('codex', codexStatus);
+      }
+      if (claudeStatus) {
+        await authService.syncCliSession('claude', claudeStatus);
+      }
       const runtime = getRuntimeState();
       const readiness = await systemService.getReadiness();
+      const appSettings = await appSettingsService.getSettings();
+      const safeLastDiff = await sanitizeDiffForResponse(runtime.workspace.projectRoot, runtime.lastDiff);
 
       response.json({
         codexStatus,
+        assistantProviders,
+        appSettings,
         workspace: runtime.workspace,
         pendingApproval: runtime.pendingApproval,
-        lastDiff: runtime.lastDiff,
+        lastDiff: safeLastDiff,
         audio: runtime.audio,
         voiceSession: runtime.voiceSession,
         system: {
@@ -214,6 +295,80 @@ export function createApp() {
   );
 
   app.post(
+    '/api/voice/session/warmup',
+    asyncHandler(async (_request: Request, response: Response) => {
+      await voiceSessionService.enableBackgroundWarmup();
+      response.json({ ok: true });
+    })
+  );
+
+  app.post('/api/voice/session/warmup/release', (_request: Request, response: Response) => {
+    response.json(voiceSessionService.disableBackgroundWarmup());
+  });
+
+  app.get(
+    '/api/app/settings',
+    asyncHandler(async (_request: Request, response: Response) => {
+      response.json(await appSettingsService.getSettings());
+    })
+  );
+
+  app.put(
+    '/api/app/settings',
+    asyncHandler(async (request: Request, response: Response) => {
+      const themeValue = optionalTrimmedString(request.body.theme);
+      const welcomedAtValue = optionalTrimmedString(request.body.welcomedAt);
+      const displayNameValue = request.body.displayName;
+      const nextSettings = await appSettingsService.updateSettings({
+        displayName:
+          displayNameValue === undefined
+            ? undefined
+            : optionalTrimmedString(displayNameValue) ?? null,
+        welcomedAt:
+          request.body.welcomedAt === undefined
+            ? undefined
+            : welcomedAtValue ?? null,
+        theme: themeValue === 'light' || themeValue === 'dark' ? (themeValue as AppTheme) : undefined
+      });
+      response.json(nextSettings);
+    })
+  );
+
+  app.post(
+    '/api/app/reset',
+    asyncHandler(async (_request: Request, response: Response) => {
+      voiceSessionService.stop();
+      voiceSessionService.disableBackgroundWarmup();
+
+      await chatService.clearConversationHistory();
+      chatService.clearDiff();
+      clearPendingApproval();
+      setLastDiff(null);
+      setActiveProviderId(null);
+      setWorkspaceState({
+        id: null,
+        projectRoot: null,
+        projectName: null,
+        isGitRepo: false,
+        writeAccessEnabled: false
+      });
+      await appResetService.resetPersistedData();
+      const resetVoiceSettings = await voiceSettingsService.getResolvedSettings();
+      resetVoiceSessionState('idle');
+      setVoiceSessionState({
+        silenceWindowMs: resetVoiceSettings.silenceWindowMs
+      });
+
+      eventBus.emit({
+        type: 'status_refresh',
+        payload: {}
+      });
+
+      response.json({ ok: true });
+    })
+  );
+
+  app.post(
     '/api/voice/session/start',
     asyncHandler(async (_request: Request, response: Response) => {
       const voiceSession = await voiceSessionService.start();
@@ -249,8 +404,31 @@ export function createApp() {
         voiceLocale: optionalTrimmedString(request.body.voiceLocale),
         transcriptionLanguageCode: optionalTrimmedString(request.body.transcriptionLanguageCode),
         transcriptionModel:
-          request.body.transcriptionModel === 'multilingual-small' ? 'multilingual-small' : undefined,
+          request.body.transcriptionModel === 'multilingual-small' ||
+          request.body.transcriptionModel === 'moonshine-base' ||
+          request.body.transcriptionModel === 'moonshine-tiny' ||
+          request.body.transcriptionModel === 'default'
+            ? request.body.transcriptionModel
+            : undefined,
         ttsVoice: optionalTrimmedString(request.body.ttsVoice),
+        qualityProfile:
+          request.body.qualityProfile === 'low_memory' ||
+          request.body.qualityProfile === 'balanced' ||
+          request.body.qualityProfile === 'demo'
+            ? request.body.qualityProfile
+            : undefined,
+        noiseMode:
+          request.body.noiseMode === 'normal' ||
+          request.body.noiseMode === 'focused' ||
+          request.body.noiseMode === 'noisy_room'
+            ? request.body.noiseMode
+            : undefined,
+        narrationMode:
+          request.body.narrationMode === 'narrated' ||
+          request.body.narrationMode === 'silent_progress' ||
+          request.body.narrationMode === 'muted'
+            ? request.body.narrationMode
+            : undefined,
         autoResumeAfterReply:
           request.body.autoResumeAfterReply === undefined
             ? undefined
@@ -298,6 +476,24 @@ export function createApp() {
     })
   );
 
+  app.get(
+    '/api/claude/settings',
+    asyncHandler(async (_request: Request, response: Response) => {
+      response.json(await claudeSettingsService.getSettings());
+    })
+  );
+
+  app.put(
+    '/api/claude/settings',
+    asyncHandler(async (request: Request, response: Response) => {
+      response.json(
+        await claudeSettingsService.updateSettings({
+          model: optionalTrimmedString(request.body.model)
+        })
+      );
+    })
+  );
+
   app.post(
     '/api/voice/commands/resolve',
     asyncHandler(async (request: Request, response: Response) => {
@@ -310,23 +506,39 @@ export function createApp() {
     '/api/voice/commands/apply',
     asyncHandler(async (request: Request, response: Response) => {
       const action = request.body.action;
-      if (!action || typeof action !== 'object' || action.type !== 'set_codex_model') {
+      if (!action || typeof action !== 'object') {
         throw new AppError(400, 'Unsupported voice command action.', 'INVALID_INPUT');
       }
 
-      response.json({
-        ok: true,
-        ...(await voiceCommandService.applyAction({
-          type: 'set_codex_model',
-          model: requireTrimmedString(action.model, 'action.model'),
-          reasoningEffort: optionalTrimmedString(action.reasoningEffort) as
-            | 'low'
-            | 'medium'
-            | 'high'
-            | 'xhigh'
-            | null
-        }))
-      });
+      if (action.type === 'set_codex_model') {
+        response.json({
+          ok: true,
+          ...(await voiceCommandService.applyAction({
+            type: 'set_codex_model',
+            model: requireTrimmedString(action.model, 'action.model'),
+            reasoningEffort: optionalTrimmedString(action.reasoningEffort) as
+              | 'low'
+              | 'medium'
+              | 'high'
+              | 'xhigh'
+              | null
+          }))
+        });
+        return;
+      }
+
+      if (action.type === 'set_claude_model') {
+        response.json({
+          ok: true,
+          ...(await voiceCommandService.applyAction({
+            type: 'set_claude_model',
+            model: requireTrimmedString(action.model, 'action.model')
+          }))
+        });
+        return;
+      }
+
+      throw new AppError(400, 'Unsupported voice command action.', 'INVALID_INPUT');
     })
   );
 
@@ -370,17 +582,46 @@ export function createApp() {
   }));
 
   app.post(
-    '/api/codex/logout',
-    asyncHandler(async (_request: Request, response: Response) => {
+    '/api/assistant/active-provider',
+    asyncHandler(async (request: Request, response: Response) => {
+      const providerId = requireTrimmedString(request.body.providerId, 'providerId');
+      if (providerId !== 'codex' && providerId !== 'claude') {
+        throw new AppError(400, 'Unsupported assistant provider.', 'INVALID_INPUT');
+      }
+
+      response.json(await setActiveAssistantProvider(providerId as AssistantProviderId));
+    })
+  );
+
+  app.post(
+    '/api/assistant/providers/:providerId/connect',
+    asyncHandler(async (request: Request, response: Response) => {
+      const providerId = getRouteParam(request.params.providerId, 'providerId');
+      if (providerId !== 'codex' && providerId !== 'claude') {
+        throw new AppError(400, 'Unsupported assistant provider.', 'INVALID_INPUT');
+      }
+
+      const assistantProviders = await connectAssistantProvider(providerId as AssistantProviderId);
+      response.json({
+        ok: true,
+        assistantProviders
+      });
+    })
+  );
+
+  app.post(
+    '/api/assistant/providers/:providerId/disconnect',
+    asyncHandler(async (request: Request, response: Response) => {
+      const providerId = getRouteParam(request.params.providerId, 'providerId');
+      if (providerId !== 'codex' && providerId !== 'claude') {
+        throw new AppError(400, 'Unsupported assistant provider.', 'INVALID_INPUT');
+      }
+
       voiceSessionService.stop();
-      await logoutCodex();
+      const assistantProviders = await disconnectAssistantProvider(providerId as AssistantProviderId);
       await workspaceService.updateWriteAccess(false);
       clearPendingApproval();
-      await authService.syncCodexCliSession({
-        loggedIn: false,
-        authMode: null
-      });
-      response.json({ ok: true });
+      response.json({ ok: true, assistantProviders });
     })
   );
 
@@ -521,8 +762,10 @@ export function createApp() {
       const voiceTurnId = getVoiceTurnId(request);
       const abortController = new AbortController();
 
-      request.on('close', () => {
-        abortController.abort();
+      response.on('close', () => {
+        if (!response.writableEnded) {
+          abortController.abort();
+        }
       });
 
       try {
@@ -547,6 +790,14 @@ export function createApp() {
                 writeNdjson(response, {
                   type: 'delta',
                   assistantMessage
+                });
+              }
+            },
+            onActivity: ({ activity }) => {
+              if (!abortController.signal.aborted) {
+                writeNdjson(response, {
+                  type: 'activity',
+                  activity
                 });
               }
             }
@@ -584,7 +835,7 @@ export function createApp() {
             errorCode: isAppError(error) ? error.code : 'INTERNAL_SERVER_ERROR',
             message: error instanceof Error ? error.message : 'Unhandled API error'
           });
-          const classified = error instanceof CodexClientError ? error : null;
+          const classified = error instanceof AssistantClientError ? error : null;
           writeNdjson(response, {
             type: 'error',
             error: classified?.friendlyMessage ?? (error instanceof Error ? error.message : 'Unable to stream chat response.'),
@@ -685,7 +936,7 @@ export function createApp() {
       details
     });
 
-    const classified = error instanceof CodexClientError ? error : null;
+    const classified = error instanceof AssistantClientError ? error : null;
     response.status(isAppError(error) ? error.statusCode : 500).json({
       error: classified?.friendlyMessage ?? (error instanceof Error ? error.message : 'Internal server error.'),
       code: isAppError(error) ? error.code : 'INTERNAL_SERVER_ERROR',

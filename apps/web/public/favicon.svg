@@ -1,0 +1,14 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="vocodFaviconGradient" x1="32" y1="52" x2="212" y2="208" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7C6BFF"/>
+      <stop offset="0.5" stop-color="#00E5FF"/>
+      <stop offset="1" stop-color="#6FFBBE"/>
+    </linearGradient>
+  </defs>
+  <rect x="20" y="20" width="216" height="216" rx="56" fill="#0D1116"/>
+  <path d="M42 124H72L88 82L108 180L128 58L146 160L164 104H190" stroke="url(#vocodFaviconGradient)" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M160 82H212V102" stroke="url(#vocodFaviconGradient)" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M160 174H212V154" stroke="url(#vocodFaviconGradient)" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M160 128L182 106L160 84" stroke="url(#vocodFaviconGradient)" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

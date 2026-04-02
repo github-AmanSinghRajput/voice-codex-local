@@ -11,8 +11,9 @@ import {
   decideWriteIntent,
   executeApprovedWrite,
   generateAssistantReply,
+  revertProtectedGitChanges,
   streamAssistantReply
-} from '../../codex-client.js';
+} from '../../assistant-client.js';
 import type {
   ChatMessage,
   ChatSource,
@@ -52,6 +53,7 @@ interface CodexCorrelationOptions {
 interface StreamTurnCallbacks {
   onStarted?: (payload: { userMessage: ChatMessage; assistantMessage: ChatMessage }) => void;
   onDelta?: (payload: { assistantMessage: ChatMessage }) => void;
+  onActivity?: (payload: { activity: string }) => void;
 }
 
 interface ChatCodexAdapter {
@@ -59,6 +61,7 @@ interface ChatCodexAdapter {
   decideWriteIntent: typeof decideWriteIntent;
   executeApprovedWrite: typeof executeApprovedWrite;
   generateAssistantReply: typeof generateAssistantReply;
+  revertProtectedGitChanges?: typeof revertProtectedGitChanges;
   streamAssistantReply: typeof streamAssistantReply;
 }
 
@@ -75,6 +78,7 @@ const defaultCodexAdapter: ChatCodexAdapter = {
   decideWriteIntent,
   executeApprovedWrite,
   generateAssistantReply,
+  revertProtectedGitChanges,
   streamAssistantReply
 };
 
@@ -129,6 +133,9 @@ export class ChatService {
         callbacks?.onDelta?.({
           assistantMessage: { ...assistantMessage }
         });
+      },
+      onActivityUpdate: (activity) => {
+        callbacks?.onActivity?.({ activity });
       }
     });
 
@@ -182,9 +189,9 @@ export class ChatService {
       projectRoot: workspace.projectRoot,
       userRequest: text,
       title: decision.proposal_title || 'Approved coding task',
-      summary: decision.proposal_summary || decision.assistant_text,
-      tasks: decision.tasks,
-      agents: decision.agents
+      summary: decision.proposal_summary || decision.assistant_text || '',
+      tasks: Array.isArray(decision.tasks) ? decision.tasks : [],
+      agents: Array.isArray(decision.agents) ? decision.agents : []
     });
 
     const assistantMessage = this.toChatMessage('assistant', decision.assistant_text, source);
@@ -210,7 +217,11 @@ export class ChatService {
     const assistantMessage = this.toChatMessage('assistant', execution.text, 'text');
     await this.persistMessages([assistantMessage]);
 
-    const diff = await this.codex.collectGitDiff(approval.projectRoot);
+    let diff = await this.codex.collectGitDiff(approval.projectRoot);
+    if (diff.redactedFiles && diff.redactedFiles.length > 0) {
+      await this.codex.revertProtectedGitChanges?.(approval.projectRoot, diff.redactedFiles);
+      diff = await this.codex.collectGitDiff(approval.projectRoot);
+    }
     this.runtime.setLastDiff(diff);
     this.runtime.clearPendingApproval();
     await this.approvalRepository.recordDecision({
@@ -222,7 +233,13 @@ export class ChatService {
     });
 
     return {
-      assistantMessage,
+      assistantMessage:
+        diff.redactedFiles && diff.redactedFiles.length > 0
+          ? {
+              ...assistantMessage,
+              text: `${assistantMessage.text}\n\nVOCOD withheld diff output for protected files: ${diff.redactedFiles.join(', ')}`
+            }
+          : assistantMessage,
       diff
     };
   }
@@ -287,6 +304,11 @@ function looksLikeWriteRequest(text: string) {
   const normalized = text.trim().toLowerCase();
   if (!normalized) {
     return false;
+  }
+
+  const confirmationPattern = /\b(go ahead|do it|apply|approve|yes.*apply|yes.*change|make.*change|yeah.*apply|sure.*apply|ok.*apply)\b/;
+  if (confirmationPattern.test(normalized)) {
+    return true;
   }
 
   const readPattern = /\b(explain|describe|show\s+me|what|why|how|tell\s+me|list|read|check)\b/;

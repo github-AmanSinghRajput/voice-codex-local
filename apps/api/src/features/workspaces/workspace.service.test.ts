@@ -5,6 +5,7 @@ import { WorkspaceService } from './workspace.service.js';
 
 function createWorkspaceRuntime(initialWorkspace?: Partial<WorkspaceState>) {
   const runtime: RuntimeState = {
+    activeProviderId: 'codex',
     workspace: {
       id: null,
       projectRoot: null,

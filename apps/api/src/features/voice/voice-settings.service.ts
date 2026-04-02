@@ -6,6 +6,9 @@ import type {
   TranscriptionLanguageOption,
   TranscriptionModelOption,
   VoiceOption,
+  VoiceNoiseMode,
+  VoiceNarrationMode,
+  VoiceQualityProfile,
   VoiceSettings,
   VoiceSettingsCapabilities
 } from '../../types.js';
@@ -17,8 +20,11 @@ const defaultVoiceSettings: VoiceSettings = {
   voiceLocale: env.voiceLocale,
   autoResumeAfterReply: true,
   transcriptionLanguageCode: env.transcriptionLanguageCode,
-  transcriptionModel: env.whisperMultilingualModelPath ? 'multilingual-small' : 'default',
-  ttsVoice: env.kokoroVoice
+  transcriptionModel: getInitialTranscriptionModel(),
+  ttsVoice: env.kokoroVoice,
+  narrationMode: 'silent_progress',
+  qualityProfile: 'demo',
+  noiseMode: 'focused'
 };
 
 interface UpdateVoiceSettingsInput {
@@ -28,6 +34,9 @@ interface UpdateVoiceSettingsInput {
   transcriptionLanguageCode?: string;
   transcriptionModel?: VoiceSettings['transcriptionModel'];
   ttsVoice?: string;
+  narrationMode?: VoiceNarrationMode;
+  qualityProfile?: VoiceQualityProfile;
+  noiseMode?: VoiceNoiseMode;
 }
 
 export class VoiceSettingsService {
@@ -59,11 +68,26 @@ export class VoiceSettingsService {
       getTranscriptionModelOptions()
     ]);
     const current = mergeVoiceSettings(persisted, voices);
+    const draft = {
+      ...current,
+      ...input
+    };
+
+    if (input.qualityProfile) {
+      const profileDefaults = getVoiceProfileDefaults(input.qualityProfile);
+      if (input.silenceWindowMs === undefined) {
+        draft.silenceWindowMs = profileDefaults.silenceWindowMs;
+      }
+      if (input.transcriptionLanguageCode === undefined) {
+        draft.transcriptionLanguageCode = profileDefaults.transcriptionLanguageCode;
+      }
+      if (input.transcriptionModel === undefined) {
+        draft.transcriptionModel = profileDefaults.transcriptionModel;
+      }
+    }
+
     const nextSettings = sanitizeVoiceSettings(
-      {
-        ...current,
-        ...input
-      },
+      draft,
       voices
     );
 
@@ -100,24 +124,53 @@ export class VoiceSettingsService {
   async getResolvedTranscriptionConfig() {
     const settings = await this.getResolvedSettings();
     const multilingualModelPath = await findMultilingualWhisperModelPath();
+    const moonshineAvailable = Boolean(env.moonshineWorkerCommand);
+    const wantsMoonshine =
+      settings.transcriptionModel === 'moonshine-base' || settings.transcriptionModel === 'moonshine-tiny';
+
+    if (wantsMoonshine && moonshineAvailable) {
+      return {
+        provider: 'moonshine-local' as const,
+        modelPath: '',
+        languageCode:
+          settings.transcriptionLanguageCode === 'auto' ? 'en' : settings.transcriptionLanguageCode,
+        modelProfile: settings.transcriptionModel,
+        multilingualAvailable: true,
+        warnings:
+          settings.transcriptionLanguageCode === 'auto'
+            ? ['Moonshine is currently tuned for English in this app. Falling back to English.']
+            : [],
+        moonshineModelName:
+          settings.transcriptionModel === 'moonshine-tiny' ? 'moonshine/tiny' : env.moonshineModel
+      };
+    }
+
     const useMultilingualModel =
       settings.transcriptionModel === 'multilingual-small' && Boolean(multilingualModelPath);
     const languageDowngraded =
       !useMultilingualModel && settings.transcriptionLanguageCode === 'auto';
-    const languageCode = useMultilingualModel
-      ? settings.transcriptionLanguageCode
-      : languageDowngraded
-        ? 'en'
-        : settings.transcriptionLanguageCode;
+    const warnings: string[] = [];
+
+    if (wantsMoonshine && !moonshineAvailable) {
+      warnings.push('Moonshine is not configured. Falling back to Whisper.');
+    }
+
+    if (languageDowngraded) {
+      warnings.push('Auto language detection requires the multilingual model. Falling back to English.');
+    }
 
     return {
+      provider: 'whisper-local' as const,
       modelPath: useMultilingualModel ? multilingualModelPath ?? env.whisperModelPath : env.whisperModelPath,
-      languageCode,
+      languageCode: useMultilingualModel
+        ? settings.transcriptionLanguageCode
+        : languageDowngraded
+          ? 'en'
+          : settings.transcriptionLanguageCode,
       modelProfile: useMultilingualModel ? ('multilingual-small' as const) : ('default' as const),
       multilingualAvailable: Boolean(multilingualModelPath),
-      warnings: languageDowngraded
-        ? ['Auto language detection requires the multilingual model. Falling back to English.']
-        : []
+      warnings,
+      moonshineModelName: null
     };
   }
 }
@@ -136,13 +189,25 @@ function mergeVoiceSettings(
 }
 
 function sanitizeVoiceSettings(settings: Partial<VoiceSettings>, voices: VoiceOption[]): VoiceSettings {
-  const silenceWindowMs = clampNumber(settings.silenceWindowMs, 700, 5000, defaultVoiceSettings.silenceWindowMs);
+  const qualityProfile = sanitizeQualityProfile(settings.qualityProfile);
+  const noiseMode = sanitizeNoiseMode(settings.noiseMode);
+  const profileDefaults = getVoiceProfileDefaults(qualityProfile);
+  const silenceWindowMs = clampNumber(
+    settings.silenceWindowMs,
+    700,
+    5000,
+    profileDefaults.silenceWindowMs
+  );
   const voiceLocale = typeof settings.voiceLocale === 'string' && settings.voiceLocale.trim()
     ? settings.voiceLocale.trim()
     : defaultVoiceSettings.voiceLocale;
-  const transcriptionLanguageCode = sanitizeTranscriptionLanguageCode(settings.transcriptionLanguageCode);
+  const transcriptionLanguageCode = sanitizeTranscriptionLanguageCode(
+    settings.transcriptionLanguageCode,
+    profileDefaults.transcriptionLanguageCode
+  );
   const transcriptionModel =
-    settings.transcriptionModel === 'multilingual-small' ? 'multilingual-small' : 'default';
+    sanitizeTranscriptionModel(settings.transcriptionModel, profileDefaults.transcriptionModel);
+  const narrationMode = sanitizeNarrationMode(settings.narrationMode);
   const fallbackVoice = voices[0]?.id ?? defaultVoiceSettings.ttsVoice;
   const requestedVoice =
     typeof settings.ttsVoice === 'string' && settings.ttsVoice.trim()
@@ -159,7 +224,10 @@ function sanitizeVoiceSettings(settings: Partial<VoiceSettings>, voices: VoiceOp
     autoResumeAfterReply: settings.autoResumeAfterReply ?? defaultVoiceSettings.autoResumeAfterReply,
     transcriptionLanguageCode,
     transcriptionModel,
-    ttsVoice
+    ttsVoice,
+    narrationMode,
+    qualityProfile,
+    noiseMode
   };
 }
 
@@ -187,36 +255,128 @@ function clampNumber(value: number | undefined, min: number, max: number, fallba
   return Math.min(Math.max(Math.round(value), min), max);
 }
 
-function sanitizeTranscriptionLanguageCode(value: unknown) {
+function sanitizeTranscriptionLanguageCode(value: unknown, fallback: string) {
   if (typeof value !== 'string') {
-    return defaultVoiceSettings.transcriptionLanguageCode;
+    return fallback;
   }
 
   const normalized = value.trim().toLowerCase();
   if (!normalized) {
-    return defaultVoiceSettings.transcriptionLanguageCode;
+    return fallback;
   }
 
   return normalized;
 }
 
+function sanitizeTranscriptionModel(
+  value: unknown,
+  fallback: VoiceSettings['transcriptionModel']
+) {
+  if (
+    value === 'default' ||
+    value === 'multilingual-small' ||
+    value === 'moonshine-base' ||
+    value === 'moonshine-tiny'
+  ) {
+    return value;
+  }
+
+  return fallback;
+}
+
+function sanitizeNarrationMode(value: unknown): VoiceNarrationMode {
+  if (value === 'silent_progress' || value === 'muted') {
+    return value;
+  }
+
+  return 'narrated';
+}
+
+function sanitizeQualityProfile(value: unknown): VoiceQualityProfile {
+  if (value === 'low_memory' || value === 'balanced') {
+    return value;
+  }
+
+  return 'demo';
+}
+
+function sanitizeNoiseMode(value: unknown): VoiceNoiseMode {
+  if (value === 'normal' || value === 'noisy_room') {
+    return value;
+  }
+
+  return 'focused';
+}
+
+function getVoiceProfileDefaults(qualityProfile: VoiceQualityProfile) {
+  const multilingualAvailable = Boolean(env.whisperMultilingualModelPath);
+  const moonshineAvailable = Boolean(env.moonshineWorkerCommand);
+
+  if (qualityProfile === 'low_memory') {
+    return {
+      silenceWindowMs: 700,
+      transcriptionLanguageCode: 'en',
+      transcriptionModel: moonshineAvailable ? ('moonshine-tiny' as const) : ('default' as const)
+    };
+  }
+
+  if (qualityProfile === 'balanced') {
+    return {
+      silenceWindowMs: 850,
+      transcriptionLanguageCode: moonshineAvailable ? 'en' : multilingualAvailable ? 'auto' : 'en',
+      transcriptionModel: moonshineAvailable
+        ? ('moonshine-base' as const)
+        : multilingualAvailable
+          ? ('multilingual-small' as const)
+          : ('default' as const)
+    };
+  }
+
+  return {
+    silenceWindowMs: 1000,
+    transcriptionLanguageCode: moonshineAvailable ? 'en' : multilingualAvailable ? 'auto' : 'en',
+    transcriptionModel: moonshineAvailable
+      ? ('moonshine-base' as const)
+      : multilingualAvailable
+        ? ('multilingual-small' as const)
+        : ('default' as const)
+  };
+}
+
 async function getTranscriptionModelOptions(): Promise<TranscriptionModelOption[]> {
   const multilingualModelPath = await findMultilingualWhisperModelPath();
+  const moonshineAvailable = Boolean(env.moonshineWorkerCommand);
 
   return [
     {
       id: 'default',
-      label: 'Default STT model',
-      description: 'Uses the primary Whisper model configured for this app.',
+      label: 'Whisper English',
+      description: 'Uses the primary local Whisper model configured for this app.',
       available: Boolean(env.whisperModelPath)
     },
     {
       id: 'multilingual-small',
-      label: 'Whisper small multilingual',
+      label: 'Whisper multilingual',
       description: multilingualModelPath
-        ? 'Uses a multilingual Whisper small model with auto language detection support.'
+        ? 'Uses the local multilingual Whisper model with auto language detection support.'
         : 'Configure WHISPER_MULTILINGUAL_MODEL_PATH to enable local multilingual Whisper.',
       available: Boolean(multilingualModelPath)
+    },
+    {
+      id: 'moonshine-base',
+      label: 'Moonshine base',
+      description: moonshineAvailable
+        ? 'Low-latency local Moonshine transcription tuned for realtime voice.'
+        : 'Configure MOONSHINE_WORKER_COMMAND to enable local Moonshine transcription.',
+      available: moonshineAvailable
+    },
+    {
+      id: 'moonshine-tiny',
+      label: 'Moonshine tiny',
+      description: moonshineAvailable
+        ? 'Lighter Moonshine model for lower memory use and fast turn-around.'
+        : 'Configure MOONSHINE_WORKER_COMMAND to enable local Moonshine transcription.',
+      available: moonshineAvailable
     }
   ];
 }
@@ -253,4 +413,16 @@ async function findMultilingualWhisperModelPath() {
   }
 
   return null;
+}
+
+function getInitialTranscriptionModel(): VoiceSettings['transcriptionModel'] {
+  if (env.moonshineWorkerCommand) {
+    return 'moonshine-base';
+  }
+
+  if (env.whisperMultilingualModelPath) {
+    return 'multilingual-small';
+  }
+
+  return 'default';
 }

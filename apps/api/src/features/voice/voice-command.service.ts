@@ -2,15 +2,17 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { getWorkspaceState } from '../../runtime.js';
-import type {
-  ChatMessage,
-  CodexReasoningEffort
-} from '../../types.js';
+import type { AssistantProviderId, ChatMessage, CodexReasoningEffort } from '../../types.js';
 import { ChatRepository } from '../chat/chat.repository.js';
+import { getAssistantState } from '../../assistant-client.js';
 import {
   CodexSettingsService,
   type CodexSettingsPayload
 } from '../codex/codex-settings.service.js';
+import {
+  ClaudeSettingsService,
+  type ClaudeSettingsPayload
+} from '../claude/claude-settings.service.js';
 
 export type VoiceCommandScreen = 'voice' | 'workspace' | 'review' | 'terminal';
 
@@ -19,6 +21,10 @@ export type VoiceCommandAction =
       type: 'set_codex_model';
       model: string;
       reasoningEffort: CodexReasoningEffort | null;
+    }
+  | {
+      type: 'set_claude_model';
+      model: string;
     };
 
 export interface VoiceCommandOption {
@@ -62,12 +68,14 @@ interface VoiceCommandApplyResult {
 export class VoiceCommandService {
   constructor(
     private readonly codexSettingsService: CodexSettingsService = new CodexSettingsService(),
+    private readonly claudeSettingsService: ClaudeSettingsService = new ClaudeSettingsService(),
     private readonly repository: ChatRepository = new ChatRepository()
   ) {}
 
   async resolve(transcript: string): Promise<VoiceCommandResolutionResult> {
     const normalized = normalizeTranscript(transcript);
-    const command = await this.matchCommand(normalized, transcript);
+    const providerContext = await this.getProviderCommandContext();
+    const command = await this.matchCommand(normalized, transcript, providerContext);
 
     if (!command) {
       return {
@@ -79,16 +87,16 @@ export class VoiceCommandService {
     await this.repository.appendMessages([userMessage]);
 
     if (command.kind === 'current_model') {
-      const payload = await this.codexSettingsService.getSettings();
+      const payload = providerContext.payload;
       return this.persistHandled(
         userMessage,
-        describeCurrentModel(payload),
+        describeCurrentModel(providerContext.providerId, payload),
         'voice'
       );
     }
 
     if (command.kind === 'status') {
-      const payload = await this.codexSettingsService.getSettings();
+      const payload = providerContext.payload;
       const workspace = getWorkspaceState();
       return this.persistHandled(
         userMessage,
@@ -97,25 +105,35 @@ export class VoiceCommandService {
             ? `Workspace is set to ${workspace.projectName ?? path.basename(workspace.projectRoot)}.`
             : 'No project folder is selected yet.',
           workspace.writeAccessEnabled ? 'Edits are enabled.' : 'Edits are still locked.',
-          describeCurrentModel(payload)
+          describeCurrentModel(providerContext.providerId, payload)
         ].join(' '),
         'voice',
         workspace.projectRoot ? 'voice' : 'workspace'
       );
     }
 
+    if (command.kind === 'limits') {
+      return this.persistHandled(
+        userMessage,
+        describeLimitVisibility(providerContext.providerId),
+        'voice'
+      );
+    }
+
     if (command.kind === 'list_models') {
-      const payload = await this.codexSettingsService.getSettings();
+      const payload = providerContext.payload;
       if (payload.options.models.length === 0) {
         return this.persistHandled(
           userMessage,
-          'I could not find any locally cached Codex models yet. Open Codex once from the CLI, then ask again.',
+          providerContext.providerId === 'claude'
+            ? 'I could not find any Claude Code models to show right now.'
+            : 'I could not find any locally cached Codex models yet. Open Codex once from the CLI, then ask again.',
           'voice'
         );
       }
       const assistantMessage = createChatMessage(
         'assistant',
-        'I pulled the available Codex models. Pick one from the list on screen and I will switch to it.',
+        `I pulled the available ${providerContext.providerId === 'claude' ? 'Claude Code' : 'Codex'} models. Pick one from the list on screen and I will switch to it.`,
         'voice'
       );
       await this.repository.appendMessages([assistantMessage]);
@@ -124,15 +142,15 @@ export class VoiceCommandService {
         status: 'options_required',
         userMessage,
         assistantMessage,
-        commandTitle: 'Choose Codex model',
+        commandTitle: `Choose ${providerContext.providerId === 'claude' ? 'Claude Code' : 'Codex'} model`,
         commandPrompt: 'Select a model to use for the next turns.',
-        options: createModelOptions(payload),
+        options: createModelOptions(providerContext.providerId, payload),
         suggestedScreen: 'voice'
       };
     }
 
     if (command.kind === 'set_model') {
-      const payload = await this.codexSettingsService.getSettings();
+      const payload = providerContext.payload;
       const targetModel = findModelOption(payload, command.model);
 
       if (!targetModel) {
@@ -147,26 +165,18 @@ export class VoiceCommandService {
           status: 'options_required',
           userMessage,
           assistantMessage,
-          commandTitle: 'Choose Codex model',
+          commandTitle: `Choose ${providerContext.providerId === 'claude' ? 'Claude Code' : 'Codex'} model`,
           commandPrompt: 'Select one of the detected models.',
-          options: createModelOptions(payload),
+          options: createModelOptions(providerContext.providerId, payload),
           suggestedScreen: 'voice'
         };
       }
 
-      const reasoningEffort =
-        command.reasoningEffort ??
-        targetModel.defaultReasoningEffort ??
-        payload.settings.reasoningEffort ??
-        null;
-      const next = await this.codexSettingsService.updateSettings({
-        model: targetModel.slug,
-        reasoningEffort
-      });
+      const next = await this.applyProviderModelChange(providerContext.providerId, payload, command);
 
       return this.persistHandled(
         userMessage,
-        `Switched Codex to ${next.settings.model}${next.settings.reasoningEffort ? ` with ${next.settings.reasoningEffort} reasoning.` : '.'}`,
+        describeModelSwitch(providerContext.providerId, next.settings.model, 'reasoningEffort' in next.settings ? next.settings.reasoningEffort : null),
         'voice'
       );
     }
@@ -199,7 +209,66 @@ export class VoiceCommandService {
       };
     }
 
+    if (action.type === 'set_claude_model') {
+      const next = await this.claudeSettingsService.updateSettings({
+        model: action.model
+      });
+      const assistantMessage = createChatMessage(
+        'assistant',
+        describeModelSwitch('claude', next.settings.model, null),
+        'voice'
+      );
+      await this.repository.appendMessages([assistantMessage]);
+
+      return {
+        assistantMessage,
+        suggestedScreen: 'voice'
+      };
+    }
+
     throw new Error('Unsupported voice command action.');
+  }
+
+  private async getProviderCommandContext() {
+    const assistantState = await getAssistantState();
+    const providerId: AssistantProviderId = assistantState.activeProviderId === 'claude' ? 'claude' : 'codex';
+    const payload =
+      providerId === 'claude'
+        ? await this.claudeSettingsService.getSettings()
+        : await this.codexSettingsService.getSettings();
+
+    return {
+      providerId,
+      payload
+    };
+  }
+
+  private async applyProviderModelChange(
+    providerId: AssistantProviderId,
+    payload: CodexSettingsPayload | ClaudeSettingsPayload,
+    command: { model: string; reasoningEffort: CodexReasoningEffort | null }
+  ) {
+    const targetModel = findModelOption(payload, command.model);
+    if (!targetModel) {
+      throw new Error(`Unknown ${providerId} model: ${command.model}`);
+    }
+
+    if (providerId === 'claude') {
+      return this.claudeSettingsService.updateSettings({
+        model: targetModel.slug
+      });
+    }
+
+    const codexPayload = payload as CodexSettingsPayload;
+    const reasoningEffort =
+      command.reasoningEffort ??
+      ('defaultReasoningEffort' in targetModel ? targetModel.defaultReasoningEffort ?? null : null) ??
+      codexPayload.settings.reasoningEffort ??
+      null;
+    return this.codexSettingsService.updateSettings({
+      model: targetModel.slug,
+      reasoningEffort
+    });
   }
 
   private async persistHandled(
@@ -265,8 +334,15 @@ export class VoiceCommandService {
     }
   }
 
-  private async matchCommand(normalizedTranscript: string, rawTranscript: string) {
-    const payload = await this.codexSettingsService.getSettings();
+  private async matchCommand(
+    normalizedTranscript: string,
+    rawTranscript: string,
+    providerContext: {
+      providerId: AssistantProviderId;
+      payload: CodexSettingsPayload | ClaudeSettingsPayload;
+    }
+  ) {
+    const payload = providerContext.payload;
     const reasoningEffort = findReasoningEffort(normalizedTranscript);
 
     if (
@@ -292,6 +368,14 @@ export class VoiceCommandService {
     ) {
       return {
         kind: 'list_models'
+      } as const;
+    }
+
+    if (
+      /\b(limit|limits|usage limit|rate limit|quota|session limit|remaining limit|remaining quota)\b/.test(normalizedTranscript)
+    ) {
+      return {
+        kind: 'limits'
       } as const;
     }
 
@@ -341,28 +425,55 @@ export class VoiceCommandService {
   }
 }
 
-function createModelOptions(payload: CodexSettingsPayload): VoiceCommandOption[] {
+function createModelOptions(
+  providerId: AssistantProviderId,
+  payload: CodexSettingsPayload | ClaudeSettingsPayload
+): VoiceCommandOption[] {
   return payload.options.models.map((entry) => ({
     id: entry.slug,
-    label: entry.displayName,
+    label:
+      'suggestedForDiscussion' in entry && entry.suggestedForDiscussion
+        ? `${entry.displayName} · suggested for discussion`
+        : entry.displayName,
     description: entry.description,
-    action: {
-      type: 'set_codex_model',
-      model: entry.slug,
-      reasoningEffort: payload.settings.reasoningEffort ?? entry.defaultReasoningEffort ?? null
-    }
+    action:
+      providerId === 'claude'
+        ? {
+            type: 'set_claude_model',
+            model: entry.slug
+          }
+        : {
+            type: 'set_codex_model',
+            model: entry.slug,
+            reasoningEffort:
+              (payload as CodexSettingsPayload).settings.reasoningEffort ??
+              ('defaultReasoningEffort' in entry ? entry.defaultReasoningEffort ?? null : null)
+          }
   }));
 }
 
-function describeCurrentModel(payload: CodexSettingsPayload) {
+function describeCurrentModel(
+  providerId: AssistantProviderId,
+  payload: CodexSettingsPayload | ClaudeSettingsPayload
+) {
   if (!payload.settings.model) {
-    return 'No Codex model is pinned for this app session yet.';
+    return providerId === 'claude'
+      ? 'Claude Code is using its default model selection for this app session.'
+      : 'No Codex model is pinned for this app session yet.';
   }
 
-  return `Current Codex model is ${payload.settings.model}${payload.settings.reasoningEffort ? ` with ${payload.settings.reasoningEffort} reasoning` : ''}. Source: ${payload.source}.`;
+  if (providerId === 'claude') {
+    return `Current Claude Code model is ${payload.settings.model}. Source: ${payload.source}.`;
+  }
+
+  const codexPayload = payload as CodexSettingsPayload;
+  return `Current Codex model is ${payload.settings.model}${codexPayload.settings.reasoningEffort ? ` with ${codexPayload.settings.reasoningEffort} reasoning` : ''}. Source: ${payload.source}.`;
 }
 
-function findMentionedModel(payload: CodexSettingsPayload, normalizedTranscript: string) {
+function findMentionedModel(
+  payload: CodexSettingsPayload | ClaudeSettingsPayload,
+  normalizedTranscript: string
+) {
   return payload.options.models.find((entry) => {
     const slug = entry.slug.toLowerCase();
     const displayName = entry.displayName.toLowerCase();
@@ -370,11 +481,31 @@ function findMentionedModel(payload: CodexSettingsPayload, normalizedTranscript:
   }) ?? null;
 }
 
-function findModelOption(payload: CodexSettingsPayload, input: string) {
+function findModelOption(payload: CodexSettingsPayload | ClaudeSettingsPayload, input: string) {
   const normalizedInput = normalizeTranscript(input);
   return payload.options.models.find((entry) => {
     return normalizedInput === entry.slug.toLowerCase() || normalizedInput === entry.displayName.toLowerCase();
   }) ?? findMentionedModel(payload, normalizedInput);
+}
+
+function describeModelSwitch(
+  providerId: AssistantProviderId,
+  model: string | null,
+  reasoningEffort: CodexReasoningEffort | null
+) {
+  if (providerId === 'claude') {
+    return `Switched Claude Code to ${model ?? 'the default model'}.`;
+  }
+
+  return `Switched Codex to ${model}${reasoningEffort ? ` with ${reasoningEffort} reasoning.` : '.'}`;
+}
+
+function describeLimitVisibility(providerId: AssistantProviderId) {
+  if (providerId === 'claude') {
+    return 'Claude Code does not expose exact remaining session quota to VOCOD through the local CLI right now. If Claude reports a limit reset time, I will say it out loud when that happens.';
+  }
+
+  return 'Codex does not expose exact remaining session quota to VOCOD through the local CLI right now. If Codex reports a retry window or reset time, I will say it out loud when that happens.';
 }
 
 function extractModelSlug(transcript: string) {

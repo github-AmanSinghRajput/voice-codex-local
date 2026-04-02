@@ -499,6 +499,7 @@ async function runClaudePromptStream(options: {
     ];
 
     let stdoutBuffer = '';
+    let stderrBuffer = '';
     let settled = false;
     let latestText = '';
     let finalText = '';
@@ -612,7 +613,9 @@ async function runClaudePromptStream(options: {
       });
 
       child.stderr?.setEncoding('utf8');
-      child.stderr?.on('data', () => {});
+      child.stderr?.on('data', (chunk: string) => {
+        stderrBuffer += chunk;
+      });
 
       child.once('error', (error) => rejectOnce(error));
 
@@ -622,11 +625,28 @@ async function runClaudePromptStream(options: {
           rejectOnce(new Error('Claude stream aborted.'));
           return;
         }
-        if (finalText || latestText) {
-          resolveOnce((finalText || latestText).trim());
+
+        const trailingLine = stdoutBuffer.trim();
+        if (trailingLine) {
+          handleLine(trailingLine);
+        }
+
+        if (settled) {
           return;
         }
-        rejectOnce(new Error(`Claude exited before completing (${code ?? signal ?? 'unknown'}).`));
+
+        if (code === 0) {
+          const text = (finalText || latestText).trim();
+          if (text) {
+            resolveOnce(text);
+            return;
+          }
+        }
+
+        const exitDetail =
+          stderrBuffer.trim() ||
+          `Claude exited before completing (${code ?? signal ?? 'unknown'}).`;
+        rejectOnce(classifyClaudeError(new Error(exitDetail)));
       });
 
       if (options.signal) {

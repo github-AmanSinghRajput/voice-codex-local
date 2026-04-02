@@ -13,7 +13,7 @@ test('toKokoroVoiceOption formats readable voice labels', () => {
     id: 'af_heart',
     name: 'Heart',
     language: 'English (US) Female',
-    quality: 'default'
+    quality: 'enhanced'
   });
 
   assert.deepEqual(toKokoroVoiceOption('pm_alex'), {

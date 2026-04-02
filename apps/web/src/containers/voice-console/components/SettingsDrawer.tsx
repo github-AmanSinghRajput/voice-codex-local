@@ -1,5 +1,8 @@
 import { formatReasoningEffort } from '../lib/helpers';
 import type {
+  AppSettings,
+  AssistantProviderId,
+  ClaudeSettingsResponse,
   CodexSettingsResponse,
   ConsolePreferences,
   StatusResponse,
@@ -9,8 +12,10 @@ import type {
 
 interface SettingsDrawerProps {
   open: boolean;
+  appSettings: AppSettings | null;
   preferences: ConsolePreferences;
   codexSettings: CodexSettingsResponse | null;
+  claudeSettings: ClaudeSettingsResponse | null;
   status: StatusResponse | null;
   system: SystemResponse | null;
   voiceSettings: VoiceSettingsResponse | null;
@@ -18,6 +23,7 @@ interface SettingsDrawerProps {
     key: Key,
     value: ConsolePreferences[Key]
   ) => void;
+  onAppSettingChange: <Key extends keyof AppSettings>(key: Key, value: AppSettings[Key]) => void;
   onVoiceSettingChange: (
     key: keyof VoiceSettingsResponse['settings'],
     value: VoiceSettingsResponse['settings'][keyof VoiceSettingsResponse['settings']]
@@ -26,21 +32,44 @@ interface SettingsDrawerProps {
     key: keyof CodexSettingsResponse['settings'],
     value: CodexSettingsResponse['settings'][keyof CodexSettingsResponse['settings']]
   ) => void;
+  onClaudeSettingChange: (
+    key: keyof ClaudeSettingsResponse['settings'],
+    value: ClaudeSettingsResponse['settings'][keyof ClaudeSettingsResponse['settings']]
+  ) => void;
+  onProviderChange: (providerId: AssistantProviderId) => void;
+  onProviderDisconnect: (providerId: AssistantProviderId) => void;
   onClose: () => void;
 }
 
 export function SettingsDrawer({
   open,
+  appSettings,
   preferences,
   codexSettings,
+  claudeSettings,
   status,
   system,
   voiceSettings,
+  onAppSettingChange,
   onPreferenceChange,
   onVoiceSettingChange,
   onCodexSettingChange,
+  onClaudeSettingChange,
+  onProviderChange,
+  onProviderDisconnect,
   onClose
 }: SettingsDrawerProps) {
+  const activeProvider = status?.assistantProviders.activeProvider ?? null;
+  const connectedProviders = status?.assistantProviders.providers.filter((provider) => provider.appConnected) ?? [];
+  const codexConnected = Boolean(
+    status?.assistantProviders.providers.some((provider) => provider.id === 'codex' && provider.appConnected)
+  );
+  const claudeConnected = Boolean(
+    status?.assistantProviders.providers.some((provider) => provider.id === 'claude' && provider.appConnected)
+  );
+  const activeCodexModel = codexSettings?.settings.model ?? 'Use Codex default';
+  const activeClaudeModel = claudeSettings?.settings.model ?? 'Use Claude default';
+
   return (
     <aside className={`settings-drawer ${open ? 'open' : ''}`} aria-hidden={!open}>
       <div className="settings-drawer-backdrop" onClick={onClose} />
@@ -56,6 +85,93 @@ export function SettingsDrawer({
         </div>
 
         <div className="settings-grid">
+          <section className="content-card">
+            <div className="card-head">
+              <div>
+                <span className="metric-label">App profile</span>
+                <strong>Identity and appearance</strong>
+              </div>
+            </div>
+            <div className="settings-list">
+              <label className="settings-control">
+                <span>What should VOCOD call you?</span>
+                <input
+                  maxLength={48}
+                  type="text"
+                  value={appSettings?.displayName ?? ''}
+                  onChange={(event) => onAppSettingChange('displayName', event.target.value)}
+                  placeholder="Aman"
+                />
+              </label>
+
+              <label className="settings-control">
+                <span>Theme</span>
+                <select
+                  value={appSettings?.theme ?? 'dark'}
+                  onChange={(event) =>
+                    onAppSettingChange('theme', event.target.value as AppSettings['theme'])
+                  }
+                >
+                  <option value="dark">Dark</option>
+                  <option value="light">Light</option>
+                </select>
+              </label>
+            </div>
+          </section>
+
+          <section className="content-card">
+            <div className="card-head">
+              <div>
+                <span className="metric-label">Assistant provider</span>
+                <strong>App-managed provider access</strong>
+              </div>
+            </div>
+            <div className="settings-list">
+              <label className="settings-control">
+                <span>Active provider</span>
+                <select
+                  value={status?.assistantProviders.activeProviderId ?? 'codex'}
+                  onChange={(event) => onProviderChange(event.target.value as AssistantProviderId)}
+                  disabled={connectedProviders.length === 0}
+                >
+                  {connectedProviders.length > 0 ? (
+                    connectedProviders.map((provider) => (
+                      <option key={provider.id} value={provider.id}>
+                        {provider.name}
+                      </option>
+                    ))
+                  ) : (
+                    <option value="codex">Connect a provider first</option>
+                  )}
+                </select>
+              </label>
+
+              {(status?.assistantProviders.providers ?? []).map((provider) => (
+                <div className="settings-item" key={provider.id}>
+                  <span>{provider.name}</span>
+                  <strong>
+                    {provider.appConnected
+                      ? 'Connected'
+                      : provider.loggedIn
+                        ? 'Ready to connect'
+                        : provider.installed
+                          ? 'Login required'
+                          : 'Not installed'}
+                  </strong>
+                  {provider.appConnected ? (
+                    <button
+                      className="toolbar-button"
+                      onClick={() => onProviderDisconnect(provider.id)}
+                      type="button"
+                    >
+                      Disconnect
+                    </button>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          </section>
+
           <section className="content-card">
             <div className="card-head">
               <div>
@@ -107,6 +223,40 @@ export function SettingsDrawer({
               <div className="settings-subgroup">
                 <span className="metric-label">Speech</span>
                 <label className="settings-control">
+                  <span>Voice quality profile</span>
+                  <select
+                    value={voiceSettings?.settings.qualityProfile ?? 'demo'}
+                    onChange={(event) =>
+                      onVoiceSettingChange(
+                        'qualityProfile',
+                        event.target.value as VoiceSettingsResponse['settings']['qualityProfile']
+                      )
+                    }
+                  >
+                    <option value="demo">Demo quality</option>
+                    <option value="balanced">Balanced</option>
+                    <option value="low_memory">Low memory</option>
+                  </select>
+                </label>
+
+                <label className="settings-control">
+                  <span>Noise filtering</span>
+                  <select
+                    value={voiceSettings?.settings.noiseMode ?? 'focused'}
+                    onChange={(event) =>
+                      onVoiceSettingChange(
+                        'noiseMode',
+                        event.target.value as VoiceSettingsResponse['settings']['noiseMode']
+                      )
+                    }
+                  >
+                    <option value="focused">Focused voice</option>
+                    <option value="normal">Normal room</option>
+                    <option value="noisy_room">Noisy room</option>
+                  </select>
+                </label>
+
+                <label className="settings-control">
                   <span>Locale</span>
                   <select
                     value={voiceSettings?.settings.voiceLocale ?? 'en-US'}
@@ -138,7 +288,24 @@ export function SettingsDrawer({
                 </label>
 
                 <label className="settings-control">
-                  <span>Transcription model</span>
+                  <span>Activity narration</span>
+                  <select
+                    value={voiceSettings?.settings.narrationMode ?? 'narrated'}
+                    onChange={(event) =>
+                      onVoiceSettingChange(
+                        'narrationMode',
+                        event.target.value as VoiceSettingsResponse['settings']['narrationMode']
+                      )
+                    }
+                  >
+                    <option value="narrated">Narrated</option>
+                    <option value="silent_progress">Silent progress</option>
+                    <option value="muted">Muted</option>
+                  </select>
+                </label>
+
+                <label className="settings-control">
+                  <span>Transcription engine</span>
                   <select
                     value={voiceSettings?.settings.transcriptionModel ?? 'default'}
                     onChange={(event) =>
@@ -193,14 +360,14 @@ export function SettingsDrawer({
 
               <div className="settings-subgroup">
                 <span className="metric-label">Session behavior</span>
-              <label className="settings-control checkbox-control">
-                <span>Auto-resume listening after reply</span>
-                <input
-                  checked={voiceSettings?.settings.autoResumeAfterReply ?? true}
-                  onChange={(event) => onVoiceSettingChange('autoResumeAfterReply', event.target.checked)}
-                  type="checkbox"
-                />
-              </label>
+                <label className="settings-control checkbox-control">
+                  <span>Auto-resume listening after reply</span>
+                  <input
+                    checked={voiceSettings?.settings.autoResumeAfterReply ?? true}
+                    onChange={(event) => onVoiceSettingChange('autoResumeAfterReply', event.target.checked)}
+                    type="checkbox"
+                  />
+                </label>
               </div>
 
               <div className="settings-item">
@@ -214,62 +381,144 @@ export function SettingsDrawer({
                   Warm local Kokoro ({voiceSettings?.options.voices.find((voice) => voice.id === voiceSettings?.settings.ttsVoice)?.name ?? voiceSettings?.settings.ttsVoice ?? 'default'}) with browser fallback
                 </strong>
               </div>
-            </div>
-          </section>
-
-          <section className="content-card">
-            <div className="card-head">
-              <div>
-                <span className="metric-label">Codex execution</span>
-                <strong>App-local model overrides</strong>
-              </div>
-            </div>
-            <div className="settings-list">
-              <label className="settings-control">
-                <span>Model</span>
-                <select
-                  value={codexSettings?.settings.model ?? ''}
-                  onChange={(event) => onCodexSettingChange('model', event.target.value || null)}
-                >
-                  <option value="">Use Codex default</option>
-                  {(codexSettings?.options.models ?? []).map((option) => (
-                    <option key={option.slug} value={option.slug}>
-                      {option.displayName}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="settings-control">
-                <span>Reasoning effort</span>
-                <select
-                  value={codexSettings?.settings.reasoningEffort ?? ''}
-                  onChange={(event) =>
-                    onCodexSettingChange(
-                      'reasoningEffort',
-                      (event.target.value || null) as CodexSettingsResponse['settings']['reasoningEffort']
-                    )
-                  }
-                >
-                  <option value="">Use model default</option>
-                  {(
-                    codexSettings?.options.models.find(
-                      (option) => option.slug === codexSettings?.settings.model
-                    )?.supportedReasoningEfforts ?? []
-                  ).map((option) => (
-                    <option key={option.effort} value={option.effort}>
-                      {formatReasoningEffort(option.effort)}
-                    </option>
-                  ))}
-                </select>
-              </label>
 
               <div className="settings-item">
-                <span>Source</span>
-                <strong>{codexSettings?.source ?? 'default'}</strong>
+                <span>Speech mode</span>
+                <strong>
+                  {voiceSettings?.settings.narrationMode === 'muted'
+                    ? 'Text only'
+                    : voiceSettings?.settings.narrationMode === 'silent_progress'
+                      ? 'Reply only'
+                      : 'Narrated progress'}
+                </strong>
               </div>
             </div>
           </section>
+
+          {codexConnected ? (
+            <section className="content-card">
+              <div className="card-head">
+                <div>
+                  <span className="metric-label">Model overrides</span>
+                  <strong>OpenAI Codex execution preferences</strong>
+                </div>
+              </div>
+              <div className="settings-list">
+                <label className="settings-control">
+                  <span>Model</span>
+                  <select
+                    value={codexSettings?.settings.model ?? ''}
+                    onChange={(event) => onCodexSettingChange('model', event.target.value || null)}
+                  >
+                    <option value="">Use Codex default</option>
+                    {(codexSettings?.options.models ?? []).map((option) => (
+                      <option key={option.slug} value={option.slug}>
+                        {option.displayName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="settings-control">
+                  <span>Reasoning effort</span>
+                  <select
+                    value={codexSettings?.settings.reasoningEffort ?? ''}
+                    onChange={(event) =>
+                      onCodexSettingChange(
+                        'reasoningEffort',
+                        (event.target.value || null) as CodexSettingsResponse['settings']['reasoningEffort']
+                      )
+                    }
+                  >
+                    <option value="">Use model default</option>
+                    {(
+                      codexSettings?.options.models.find(
+                        (option) => option.slug === codexSettings?.settings.model
+                      )?.supportedReasoningEfforts ?? []
+                    ).map((option) => (
+                      <option key={option.effort} value={option.effort}>
+                        {formatReasoningEffort(option.effort)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <div className="settings-item">
+                  <span>Applies when</span>
+                  <strong>
+                    {activeProvider?.id === 'codex'
+                      ? 'Codex is active right now'
+                      : `${activeProvider?.name ?? 'Another provider'} is active right now`}
+                  </strong>
+                </div>
+
+                <div className="settings-item">
+                  <span>Current model</span>
+                  <strong>{activeCodexModel}</strong>
+                </div>
+
+                <div className="settings-item">
+                  <span>Source</span>
+                  <strong>{codexSettings?.source ?? 'default'}</strong>
+                </div>
+
+                <div className="settings-item">
+                  <span>Voice shortcut</span>
+                  <strong>Say “Hey VOCOD, list available models.”</strong>
+                </div>
+              </div>
+            </section>
+          ) : null}
+
+          {claudeConnected ? (
+            <section className="content-card">
+              <div className="card-head">
+                <div>
+                  <span className="metric-label">Model overrides</span>
+                  <strong>Claude Code execution preferences</strong>
+                </div>
+              </div>
+              <div className="settings-list">
+                <label className="settings-control">
+                  <span>Model</span>
+                  <select
+                    value={claudeSettings?.settings.model ?? ''}
+                    onChange={(event) => onClaudeSettingChange('model', event.target.value || null)}
+                  >
+                    <option value="">Use Claude default</option>
+                    {(claudeSettings?.options.models ?? []).map((option) => (
+                      <option key={option.slug} value={option.slug}>
+                        {option.displayName}{option.suggestedForDiscussion ? ' · suggested for discussion' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <div className="settings-item">
+                  <span>Suggested low-token discussion model</span>
+                  <strong>
+                    {claudeSettings?.options.models.find((option) => option.suggestedForDiscussion)?.displayName ??
+                      'Haiku'}
+                  </strong>
+                </div>
+
+                <div className="settings-item">
+                  <span>Current model</span>
+                  <strong>{activeClaudeModel}</strong>
+                </div>
+
+                <div className="settings-item">
+                  <span>Source</span>
+                  <strong>{claudeSettings?.source ?? 'default'}</strong>
+                </div>
+
+                <div className="settings-item">
+                  <span>Voice shortcut</span>
+                  <strong>Say “Hey VOCOD, list available models.”</strong>
+                </div>
+              </div>
+            </section>
+          ) : null}
 
           <section className="content-card">
             <div className="card-head">
@@ -333,8 +582,16 @@ export function SettingsDrawer({
             </div>
             <div className="settings-list">
               <div className="settings-item">
-                <span>Codex auth</span>
-                <strong>{system?.auth.codexAuth ?? 'Local CLI session'}</strong>
+                <span>Connected assistants</span>
+                <strong>
+                  {connectedProviders.length > 0
+                    ? connectedProviders.map((provider) => provider.name).join(', ')
+                    : 'No provider connected'}
+                </strong>
+              </div>
+              <div className="settings-item">
+                <span>Tracked CLI sessions</span>
+                <strong>{system?.auth.trackedSessions.length ?? 0}</strong>
               </div>
             </div>
           </section>

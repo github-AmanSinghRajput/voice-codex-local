@@ -16,10 +16,13 @@ import { ToastViewport } from './components/ToastViewport';
 import { TopBar } from './components/TopBar';
 import { buildNavigationHints, getSuggestedScreen, getVoiceState, mergeUniqueMessages } from './lib/helpers';
 import type {
+  AppSettings,
+  AssistantProviderId,
   ApprovalHistoryEntry,
   ApprovalRequiredResponse,
   AudioState,
   ChatStreamEvent,
+  ClaudeSettingsResponse,
   CodexSettingsResponse,
   ConsolePreferences,
   MessageEntry,
@@ -29,6 +32,7 @@ import type {
   ReplyResponse,
   VoiceCommandOption,
   VoiceCommandResolveResponse,
+  VoiceNarrationMode,
   VoiceSettings,
   VoiceSessionState,
   VoiceSettingsResponse
@@ -59,7 +63,13 @@ import { downmixChannels, encodePcm16Wav, mergePcmChunks } from './lib/pcm-audio
 import { splitSpeechIntoChunks } from './lib/speech-chunks';
 import { createVoiceLatencyTrace, type VoiceLatencyTrace } from './lib/voice-latency';
 
-const apiBase = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8787';
+function getApiBaseUrl() {
+  return window.desktopShell?.apiBaseUrl ?? import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8787';
+}
+
+function getApiAuthToken() {
+  return window.desktopShell?.apiAuthToken ?? import.meta.env.VITE_LOCAL_API_AUTH_TOKEN ?? null;
+}
 
 interface ToastItem {
   id: string;
@@ -69,6 +79,7 @@ interface ToastItem {
 }
 
 const consolePreferencesStorageKey = 'voice-codex-local.console-preferences';
+const appThemeStorageKey = 'voice-codex-local.app-theme';
 
 const defaultConsolePreferences: ConsolePreferences = {
   defaultScreen: 'voice',
@@ -78,10 +89,99 @@ const defaultConsolePreferences: ConsolePreferences = {
 
 const defaultSilenceWindowMs = 800;
 const RATE_LIMIT_COOLDOWN_MS = 15_000;
+const MAX_VOICE_ACTIVITY_ITEMS = 5;
+const NARRATION_COOLDOWN_MS = 2600;
+const TYPING_TICK_MS = 24;
+const UI_CUE_GAIN = 0.028;
+const DESKTOP_CAPTURE_PREROLL_MS = 900;
+const STREAMED_TTS_START_DELAY_MS = 1400;
+const BARGE_IN_ARM_DELAY_MS = 900;
+const STREAMED_TTS_MIN_CHUNKS = 2;
+const STREAMED_TTS_MIN_CHARS = 120;
+
+type UiCueKind = 'turn_end' | 'session_end';
+
+function getDesktopVadTuning(settings: VoiceSettings | null | undefined) {
+  const noiseMode = settings?.noiseMode ?? 'focused';
+
+  if (noiseMode === 'noisy_room') {
+    return {
+      minSpeechMs: 280,
+      smoothingFactor: 0.44,
+      startThreshold: 0.032,
+      sustainThreshold: 0.021,
+      ambientMultiplier: 2.5,
+      ambientPadding: 0.008
+    };
+  }
+
+  if (noiseMode === 'normal') {
+    return {
+      minSpeechMs: desktopVadConfig.minSpeechMs,
+      smoothingFactor: desktopVadConfig.smoothingFactor,
+      startThreshold: desktopVadConfig.startThreshold,
+      sustainThreshold: desktopVadConfig.sustainThreshold,
+      ambientMultiplier: 2.2,
+      ambientPadding: 0.007
+    };
+  }
+
+  return {
+    minSpeechMs: 170,
+    smoothingFactor: 0.3,
+    startThreshold: 0.021,
+    sustainThreshold: 0.014,
+    ambientMultiplier: 1.95,
+    ambientPadding: 0.004
+  };
+}
+
+function getDesktopAudioConstraints(settings: VoiceSettings | null | undefined): MediaTrackConstraints {
+  const noiseMode = settings?.noiseMode ?? 'focused';
+
+  if (noiseMode === 'noisy_room') {
+    return {
+      channelCount: 1,
+      noiseSuppression: true,
+      autoGainControl: false,
+      echoCancellation: true,
+      sampleRate: 16000
+    };
+  }
+
+  if (noiseMode === 'normal') {
+    return {
+      channelCount: 1,
+      noiseSuppression: true,
+      autoGainControl: true,
+      echoCancellation: false,
+      sampleRate: 16000
+    };
+  }
+
+  return {
+    channelCount: 1,
+    noiseSuppression: true,
+    autoGainControl: true,
+    echoCancellation: true,
+    sampleRate: 16000
+  };
+}
+
+function getActiveProviderName(status: StatusResponse | null) {
+  return status?.assistantProviders.activeProvider?.name ?? 'Assistant';
+}
+
+function getActiveProviderShortName(status: StatusResponse | null) {
+  return status?.assistantProviders.activeProvider?.id === 'claude' ? 'Claude Code' : 'Codex';
+}
 
 function extractErrorKind(error: unknown): string {
   if (error instanceof Error && 'errorKind' in error) {
     return String((error as { errorKind?: string }).errorKind ?? 'unknown');
+  }
+  if (error instanceof Error && 'kind' in error) {
+    return String((error as { kind?: string }).kind ?? 'unknown');
   }
   const message = error instanceof Error ? error.message.toLowerCase() : '';
   if (/rate.?limit|429|quota|throttl/i.test(message)) return 'rate_limit';
@@ -91,24 +191,80 @@ function extractErrorKind(error: unknown): string {
 }
 
 function getFriendlyErrorMessage(error: unknown): string {
+  if (error instanceof Error && 'friendlyMessage' in error) {
+    const friendlyMessage = (error as { friendlyMessage?: unknown }).friendlyMessage;
+    if (typeof friendlyMessage === 'string' && friendlyMessage.trim()) {
+      return friendlyMessage;
+    }
+  }
   const kind = extractErrorKind(error);
-  if (kind === 'rate_limit') return 'Codex is rate limited right now. Give it a moment and try again.';
-  if (kind === 'auth') return 'Your Codex session needs reconnecting. Run the login command to continue.';
-  if (kind === 'service') return 'Codex is not responding right now. Check your connection and try again.';
-  return error instanceof Error ? error.message : 'Something went wrong. Try again.';
+  if (kind === 'rate_limit') return 'The active assistant is rate limited right now. Give it a moment and try again.';
+  if (kind === 'auth') return 'The active assistant session needs reconnecting. Run the login command to continue.';
+  if (kind === 'service') return 'The active assistant is not responding right now. Check your connection and try again.';
+
+  const raw = error instanceof Error ? error.message : String(error);
+  if (raw.length > 120 || raw.includes('Command failed:') || raw.includes('--print') || raw.includes('--allowedTools')) {
+    return 'Something went wrong with the request. Check the error details in the voice panel.';
+  }
+  return raw;
+}
+
+function playUiCue(kind: UiCueKind) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  const AudioContextCtor = window.AudioContext;
+  if (!AudioContextCtor) {
+    return;
+  }
+
+  const audioContext = new AudioContextCtor();
+  const gainNode = audioContext.createGain();
+  gainNode.connect(audioContext.destination);
+  gainNode.gain.value = UI_CUE_GAIN;
+
+  const startAt = audioContext.currentTime + 0.01;
+  const tones =
+    kind === 'turn_end'
+      ? [
+          { frequency: 720, duration: 0.08, offset: 0 },
+          { frequency: 920, duration: 0.11, offset: 0.09 }
+        ]
+      : [
+          { frequency: 560, duration: 0.1, offset: 0 },
+          { frequency: 420, duration: 0.16, offset: 0.11 }
+        ];
+
+  for (const tone of tones) {
+    const oscillator = audioContext.createOscillator();
+    oscillator.type = 'sine';
+    oscillator.frequency.value = tone.frequency;
+    oscillator.connect(gainNode);
+    oscillator.start(startAt + tone.offset);
+    oscillator.stop(startAt + tone.offset + tone.duration);
+  }
+
+  const totalDuration = tones[tones.length - 1]!.offset + tones[tones.length - 1]!.duration + 0.06;
+  window.setTimeout(() => {
+    void audioContext.close().catch(() => undefined);
+  }, Math.ceil(totalDuration * 1000));
 }
 
 export function VoiceConsoleContainer() {
-  const service = useMemo(() => new OperatorConsoleApiService(apiBase), []);
+  const service = useMemo(
+    () => new OperatorConsoleApiService(getApiBaseUrl(), getApiAuthToken()),
+    []
+  );
   const COMMAND_KEYWORDS = /\b(init|initialize|model|models|switch|set|change|use|status|session|config|configured|active|list|show|current|which|what'?s)\b/i;
-const MAX_COMMAND_WORDS = 20;
+  const MAX_COMMAND_WORDS = 20;
 
-function looksLikeVoiceCommand(transcript: string) {
-  const wordCount = transcript.split(/\s+/).length;
-  return wordCount <= MAX_COMMAND_WORDS && COMMAND_KEYWORDS.test(transcript);
-}
+  function looksLikeVoiceCommand(transcript: string) {
+    const wordCount = transcript.split(/\s+/).length;
+    return wordCount <= MAX_COMMAND_WORDS && COMMAND_KEYWORDS.test(transcript);
+  }
 
-const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
+  const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
   const desktopDeviceRestartTimeoutRef = useRef<number | null>(null);
   const desktopMediaStreamRef = useRef<MediaStream | null>(null);
@@ -120,6 +276,7 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
   const desktopMediaLastSpeechAtRef = useRef(0);
   const desktopSmoothedRmsRef = useRef(0);
   const desktopSpeechAboveThresholdMsRef = useRef(0);
+  const desktopAmbientRmsRef = useRef(0);
   const desktopAudioContextRef = useRef<AudioContext | null>(null);
   const desktopAnalyserRef = useRef<AnalyserNode | null>(null);
   const desktopSourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
@@ -129,6 +286,7 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
   const bargeInSourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const bargeInAnalyserRef = useRef<AnalyserNode | null>(null);
   const bargeInIntervalRef = useRef<number | null>(null);
+  const bargeInArmTimeoutRef = useRef<number | null>(null);
   const bargeInAboveThresholdMsRef = useRef(0);
   const bargeInAmbientRmsRef = useRef(0);
   const bargeInTriggeredRef = useRef(false);
@@ -136,6 +294,12 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
   const playbackAudioRef = useRef<HTMLAudioElement | null>(null);
   const playbackAbortRef = useRef<(() => void) | null>(null);
   const playbackRunIdRef = useRef(0);
+  const activeVoiceAssistantMessageIdRef = useRef<string | null>(null);
+  const narrationUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const narrationAudioRef = useRef<HTMLAudioElement | null>(null);
+  const narrationCooldownUntilRef = useRef(0);
+  const narrationModeRef = useRef<VoiceNarrationMode>('narrated');
+  const previousAudibleNarrationModeRef = useRef<VoiceNarrationMode>('narrated');
   const chatStreamAbortRef = useRef<AbortController | null>(null);
   const activeVoiceSessionRef = useRef(false);
   const awaitingVoiceReplyRef = useRef(false);
@@ -150,11 +314,11 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
   const [messages, setMessages] = useState<MessageEntry[]>([]);
   const [approvals, setApprovals] = useState<ApprovalHistoryEntry[]>([]);
   const [codexSettings, setCodexSettings] = useState<CodexSettingsResponse | null>(null);
+  const [claudeSettings, setClaudeSettings] = useState<ClaudeSettingsResponse | null>(null);
   const [desktopRuntime, setDesktopRuntime] = useState<DesktopRuntimeStatus | null>(null);
   const [voiceSettings, setVoiceSettings] = useState<VoiceSettingsResponse | null>(null);
   const [textInput, setTextInput] = useState('');
   const [projectInput, setProjectInput] = useState('');
-  const [commandInput, setCommandInput] = useState('codex login --device-auth');
   const [busyLabel, setBusyLabel] = useState('');
   const [error, setError] = useState('');
   const [activeScreen, setActiveScreen] = useState<ScreenId>('workspace');
@@ -166,15 +330,56 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     prompt: string;
     options: VoiceCommandOption[];
   } | null>(null);
+  const [voiceActivity, setVoiceActivity] = useState<string | null>(null);
+  const [recentVoiceActivities, setRecentVoiceActivities] = useState<string[]>([]);
   const [preferences, setPreferences] = useState<ConsolePreferences>(() => loadConsolePreferences());
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [typedMessageText, setTypedMessageText] = useState<Record<string, string>>({});
+  const [typingTargets, setTypingTargets] = useState<Record<string, string>>({});
+  const [spokenReplyPreview, setSpokenReplyPreview] = useState('');
+  const [onboardingStep, setOnboardingStep] = useState<1 | 2 | 3>(1);
+  const [onboardingSelectedProviderId, setOnboardingSelectedProviderId] =
+    useState<AssistantProviderId | null>(null);
+  const [preferredTheme, setPreferredTheme] = useState<AppSettings['theme'] | null>(() =>
+    loadStoredAppTheme()
+  );
   const lastVoicePhaseRef = useRef<string | null>(null);
   const lastVoiceErrorRef = useRef<string | null>(null);
 
-  const codexReady = Boolean(status?.codexStatus.loggedIn);
+  const assistantReady = Boolean(status?.assistantProviders.activeProvider?.appConnected);
+  const appSettings = status?.appSettings ?? null;
+  const currentTheme = preferredTheme ?? appSettings?.theme ?? 'dark';
+  const effectiveAppSettings = useMemo<AppSettings | null>(
+    () => (appSettings ? { ...appSettings, theme: currentTheme } : null),
+    [appSettings, currentTheme]
+  );
+  const codexConnected = Boolean(
+    status?.assistantProviders.providers.some((provider) => provider.id === 'codex' && provider.appConnected)
+  );
   const voiceState = getVoiceState(status);
+  const narrationMode = voiceSettings?.settings.narrationMode ?? 'narrated';
   const deferredMessages = useDeferredValue(messages);
+  const renderedMessages = useMemo(
+    () =>
+      deferredMessages.map((message) =>
+        message.role === 'assistant' && typedMessageText[message.id] !== undefined
+          ? {
+              ...message,
+              text: typedMessageText[message.id]
+            }
+          : message
+      ),
+    [deferredMessages, typedMessageText]
+  );
   const navigationHints = buildNavigationHints(activeScreen, status, deferredMessages);
+  const streamingVoiceDraft =
+    voiceState === 'speaking' && spokenReplyPreview
+      ? spokenReplyPreview
+      : activeVoiceAssistantMessageIdRef.current
+        ? typedMessageText[activeVoiceAssistantMessageIdRef.current] ??
+          status?.voiceSession.liveTranscript ??
+          ''
+        : status?.voiceSession.liveTranscript ?? '';
 
   useEffect(() => {
     void initialize();
@@ -204,9 +409,63 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
 
   useEffect(() => {
     return () => {
+      cancelNarrationPlayback();
       void stopActiveVoiceSession(false);
     };
   }, []);
+
+  useEffect(() => {
+    const persistedTheme = appSettings?.theme;
+    if (persistedTheme === 'light' || persistedTheme === 'dark') {
+      setPreferredTheme(persistedTheme);
+    }
+  }, [appSettings?.theme]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = currentTheme;
+    storeAppTheme(currentTheme);
+  }, [currentTheme]);
+
+  useEffect(() => {
+    if (assistantReady) {
+      return;
+    }
+
+    const hasDisplayName = Boolean(status?.appSettings.displayName?.trim());
+    setOnboardingStep((current) => {
+      if (!hasDisplayName) {
+        return current === 1 ? 1 : current;
+      }
+
+      return current === 3 ? 3 : 2;
+    });
+  }, [assistantReady, status?.appSettings.displayName]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void service.warmVoiceSession().catch((error) => {
+      if (!cancelled) {
+        console.warn('[voice] background_warmup_failed', error);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      void service.releaseVoiceWarmup().catch((error) => {
+        console.warn('[voice] background_warmup_release_failed', error);
+      });
+    };
+  }, [service]);
+
+  useEffect(() => {
+    narrationModeRef.current = narrationMode;
+    if (narrationMode !== 'muted') {
+      previousAudibleNarrationModeRef.current = narrationMode;
+      return;
+    }
+
+    cancelNarrationPlayback();
+  }, [narrationMode]);
 
   useEffect(() => {
     if (status?.workspace.projectRoot) {
@@ -225,7 +484,7 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
 
     startTransition(() => {
       setActiveScreen((current) => {
-        if (!codexReady) {
+        if (!assistantReady) {
           return 'workspace';
         }
 
@@ -240,7 +499,7 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
         return current;
       });
     });
-  }, [codexReady, preferences.defaultScreen, status]);
+  }, [assistantReady, preferences.defaultScreen, status]);
 
   useEffect(() => {
     if (toasts.length === 0) {
@@ -255,6 +514,37 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
       window.clearTimeout(timeout);
     };
   }, [toasts]);
+
+  useEffect(() => {
+    const typingEntries = Object.entries(typingTargets);
+    if (typingEntries.length === 0) {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      setTypedMessageText((current) => {
+        let changed = false;
+        const next = { ...current };
+
+        for (const [messageId, targetText] of typingEntries) {
+          const currentText = next[messageId] ?? '';
+          if (currentText === targetText) {
+            continue;
+          }
+
+          const step = Math.max(1, Math.ceil((targetText.length - currentText.length) / 12));
+          next[messageId] = targetText.slice(0, Math.min(targetText.length, currentText.length + step));
+          changed = true;
+        }
+
+        return changed ? next : current;
+      });
+    }, TYPING_TICK_MS);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [typingTargets]);
 
   useEffect(() => {
     if (!error) {
@@ -279,8 +569,8 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
         'success',
         'Voice session active',
         isDesktopShell
-          ? 'Codex is listening through the desktop microphone capture path.'
-          : 'Codex is listening through the browser voice path.'
+          ? `${getActiveProviderShortName(status)} is listening through the desktop microphone capture path.`
+          : `${getActiveProviderShortName(status)} is listening through the browser voice path.`
       );
     }
 
@@ -321,6 +611,7 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
       loadLogs(),
       loadApprovals(),
       loadCodexSettings(),
+      loadClaudeSettings(),
       loadVoiceSettings()
     ]);
     if (isDesktopShell) {
@@ -394,12 +685,77 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     }
   }
 
+  async function handleAppSettingChange<Key extends keyof AppSettings>(
+    key: Key,
+    value: AppSettings[Key]
+  ) {
+    if (key === 'theme') {
+      setPreferredTheme(value as AppSettings['theme']);
+    }
+
+    try {
+      const nextSettings = await service.updateAppSettings({
+        [key]: value
+      } as Partial<AppSettings>);
+      setStatus((current) => (current ? { ...current, appSettings: nextSettings } : current));
+    } catch (requestError) {
+      if (key === 'theme') {
+        setPreferredTheme(appSettings?.theme ?? loadStoredAppTheme() ?? 'dark');
+      }
+      setError(requestError instanceof Error ? requestError.message : 'Unable to save app settings.');
+      pushToast('error', 'Settings not saved', 'Your app preferences could not be updated.');
+    }
+  }
+
+  async function handleOnboardingDisplayNameSubmit(displayName: string) {
+    const trimmedName = displayName.trim();
+    if (!trimmedName) {
+      return;
+    }
+
+    try {
+      setOnboardingStep(2);
+      const nextSettings = await service.updateAppSettings({
+        displayName: trimmedName
+      });
+      setStatus((current) => (current ? { ...current, appSettings: nextSettings } : current));
+
+      if (!nextSettings.welcomedAt) {
+        const welcomeMessage = `Good to meet you, ${trimmedName}. Let's get your assistant connected.`;
+        try {
+          await playAssistantReply(welcomeMessage, {
+            allowBargeIn: false
+          });
+        } catch {
+          // Continue even if the first-run greeting could not be spoken.
+        }
+
+        const welcomedSettings = await service.updateAppSettings({
+          welcomedAt: new Date().toISOString()
+        });
+        setStatus((current) => (current ? { ...current, appSettings: welcomedSettings } : current));
+      }
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Unable to save your name.');
+      pushToast('error', 'Welcome setup failed', 'VOCOD could not save your first-run profile yet.');
+    }
+  }
+
   async function loadCodexSettings() {
     try {
       const next = await service.getCodexSettings();
       setCodexSettings(next);
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : 'Unable to load Codex settings.');
+      setError(requestError instanceof Error ? requestError.message : 'Unable to load model override settings.');
+    }
+  }
+
+  async function loadClaudeSettings() {
+    try {
+      const next = await service.getClaudeSettings();
+      setClaudeSettings(next);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Unable to load Claude model settings.');
     }
   }
 
@@ -415,6 +771,7 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
       voiceTurnId?: string;
       onStarted?: (event: Extract<ChatStreamEvent, { type: 'started' }>) => void;
       onDelta?: (event: Extract<ChatStreamEvent, { type: 'delta' }>) => void;
+      onActivity?: (event: Extract<ChatStreamEvent, { type: 'activity' }>) => void;
     } = {}
   ): Promise<ReplyResponse | ApprovalRequiredResponse> {
     abortActiveChatStream();
@@ -423,42 +780,84 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     let result: ReplyResponse | ApprovalRequiredResponse | null = null;
 
     try {
-      await service.streamMessage(
-        message,
-        source,
-        (event) => {
-          if (event.type === 'started') {
-            setMessages((current) =>
-              mergeUniqueMessages(current, [event.userMessage, event.assistantMessage])
-            );
-            options.onStarted?.(event);
-            return;
-          }
+      try {
+        await service.streamMessage(
+          message,
+          source,
+          (event) => {
+            if (event.type === 'started') {
+              setMessages((current) =>
+                mergeUniqueMessages(current, [event.userMessage, event.assistantMessage])
+              );
+              setTypingTargets((current) => ({
+                ...current,
+                [event.assistantMessage.id]: event.assistantMessage.text
+              }));
+              setTypedMessageText((current) => ({
+                ...current,
+                [event.assistantMessage.id]: current[event.assistantMessage.id] ?? ''
+              }));
+              options.onStarted?.(event);
+              return;
+            }
 
-          if (event.type === 'delta') {
-            setMessages((current) => mergeUniqueMessages(current, [event.assistantMessage]));
-            options.onDelta?.(event);
-            return;
-          }
+            if (event.type === 'delta') {
+              setMessages((current) => mergeUniqueMessages(current, [event.assistantMessage]));
+              setTypingTargets((current) => ({
+                ...current,
+                [event.assistantMessage.id]: event.assistantMessage.text
+              }));
+              options.onDelta?.(event);
+              return;
+            }
 
-          if (event.type === 'completed') {
-            result = event.result;
-            setMessages((current) =>
-              mergeUniqueMessages(current, [event.result.userMessage, event.result.assistantMessage])
-            );
-            return;
-          }
+            if (event.type === 'activity') {
+              options.onActivity?.(event);
+              return;
+            }
 
-          throw new Error(event.error);
-        },
-        {
-          signal: abortController.signal,
-          voiceTurnId: options.voiceTurnId
+            if (event.type === 'completed') {
+              result = event.result;
+              setMessages((current) =>
+                mergeUniqueMessages(current, [event.result.userMessage, event.result.assistantMessage])
+              );
+              setTypingTargets((current) => ({
+                ...current,
+                [event.result.assistantMessage.id]: event.result.assistantMessage.text
+              }));
+              return;
+            }
+
+            throw new Error(event.error);
+          },
+          {
+            signal: abortController.signal,
+            voiceTurnId: options.voiceTurnId
+          }
+        );
+      } catch (streamError) {
+        if (abortController.signal.aborted) {
+          throw streamError;
         }
-      );
+        console.warn('[chat][stream] stream failed, falling back to batch', streamError);
+      }
 
       if (!result) {
-        throw new Error('Chat stream completed without a final result.');
+        const batchResult = await service.sendMessage(message, source, options.voiceTurnId);
+        setMessages((current) =>
+          mergeUniqueMessages(current, [batchResult.userMessage, batchResult.assistantMessage])
+        );
+        setTypingTargets((current) => {
+          const next = { ...current };
+          delete next[batchResult.assistantMessage.id];
+          return next;
+        });
+        setTypedMessageText((current) => {
+          const next = { ...current };
+          delete next[batchResult.assistantMessage.id];
+          return next;
+        });
+        return batchResult;
       }
 
       return result;
@@ -525,7 +924,7 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
         'info',
         enabled ? 'Write mode enabled' : 'Write mode revoked',
         enabled
-          ? 'Codex can now propose edits that still require explicit approval.'
+          ? `${getActiveProviderShortName(status)} can now propose edits that still require explicit approval.`
           : 'The console is back in advisory read-only mode.'
       );
     } catch (requestError) {
@@ -541,6 +940,9 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
       await stopActiveVoiceSession(false);
       await service.clearLogs();
       setMessages([]);
+      setTypingTargets({});
+      setTypedMessageText({});
+      activeVoiceAssistantMessageIdRef.current = null;
       await refreshStatus();
       await loadApprovals();
       pushToast('success', 'Chat cleared', 'Conversation history was removed from the active session.');
@@ -551,16 +953,24 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     }
   }
 
-  async function handleLogout() {
-    setBusyLabel('Logging out of Codex...');
+  async function handleDisconnect() {
+    const activeProviderId = status?.assistantProviders.activeProviderId;
+    if (!activeProviderId) {
+      return;
+    }
+    const activeProviderName = getActiveProviderShortName(status);
+    setBusyLabel(`Disconnecting ${activeProviderName}...`);
     try {
       await stopActiveVoiceSession(false);
-      await service.logoutCodex();
+      await service.disconnectProvider(activeProviderId);
       setMessages([]);
+      setTypingTargets({});
+      setTypedMessageText({});
+      activeVoiceAssistantMessageIdRef.current = null;
       await Promise.all([refreshStatus(), loadSystem()]);
-      pushToast('info', 'Codex logged out', 'Local Codex CLI session has been cleared.');
+      pushToast('info', `${activeProviderName} disconnected`, 'The app-level connection was removed.');
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : 'Unable to logout of Codex.');
+      setError(requestError instanceof Error ? requestError.message : `Unable to disconnect ${activeProviderName}.`);
     } finally {
       setBusyLabel('');
     }
@@ -570,6 +980,7 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     setBusyLabel('Starting voice session...');
     let backendVoiceStarted = false;
     try {
+      clearVoiceActivity();
       const audio = isDesktopShell
         ? await refreshDesktopAudioState(false)
         : await refreshBrowserAudioState(true);
@@ -630,7 +1041,9 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
   async function handleStopVoice() {
     setBusyLabel('Ending voice session...');
     try {
+      cancelNarrationPlayback();
       await stopActiveVoiceSession();
+      playUiCue('session_end');
       pushToast('info', 'Voice session ended', 'Continuous voice loop has been stopped.');
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'Unable to stop voice chat.');
@@ -649,7 +1062,7 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
       const result = await service.approveChange(status.pendingApproval.id);
       setMessages((current) => [...current, result.assistantMessage]);
       await Promise.all([refreshStatus(), loadApprovals(), loadLogs()]);
-      pushToast('success', 'Changes approved', 'Codex applied the approved diff to the workspace.');
+      pushToast('success', 'Changes approved', `${getActiveProviderShortName(status)} applied the approved diff to the workspace.`);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'Unable to approve changes.');
     } finally {
@@ -690,6 +1103,7 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     setTextInput('');
     setIsSubmittingTurn(true);
     setBusyLabel('Generating reply...');
+    clearVoiceActivity();
     try {
       const result = await streamChatMessage(nextMessage, 'text');
       await Promise.all([refreshStatus(), loadApprovals()]);
@@ -722,6 +1136,13 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     };
 
     setVoiceSettings(optimisticSettings);
+    if (key === 'narrationMode' && value !== 'muted') {
+      previousAudibleNarrationModeRef.current = value as VoiceNarrationMode;
+    }
+    if (key === 'narrationMode' && value === 'muted') {
+      cancelAssistantPlayback();
+      cancelNarrationPlayback();
+    }
 
     try {
       const next = await service.updateVoiceSettings({
@@ -763,9 +1184,147 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
       });
       setCodexSettings(next);
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : 'Unable to save Codex settings.');
-      pushToast('error', 'Codex settings not saved', 'Model preferences could not be updated.');
+      setError(requestError instanceof Error ? requestError.message : 'Unable to save model override settings.');
+      pushToast('error', 'Model overrides not saved', 'Codex preferences could not be updated.');
       await loadCodexSettings();
+    }
+  }
+
+  async function handleClaudeSettingChange(
+    key: keyof ClaudeSettingsResponse['settings'],
+    value: ClaudeSettingsResponse['settings'][keyof ClaudeSettingsResponse['settings']]
+  ) {
+    if (!claudeSettings) {
+      return;
+    }
+
+    const optimisticSettings: ClaudeSettingsResponse = {
+      ...claudeSettings,
+      settings: {
+        ...claudeSettings.settings,
+        [key]: value
+      }
+    };
+    setClaudeSettings(optimisticSettings);
+
+    try {
+      const next = await service.updateClaudeSettings({
+        [key]: value
+      });
+      setClaudeSettings(next);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Unable to save Claude model settings.');
+      pushToast('error', 'Claude model not saved', 'Claude preferences could not be updated.');
+      await loadClaudeSettings();
+    }
+  }
+
+  async function handleProviderChange(providerId: AssistantProviderId) {
+    setBusyLabel(`Switching to ${providerId === 'claude' ? 'Claude Code' : 'Codex'}...`);
+    try {
+      const assistantProviders = await service.setActiveProvider(providerId);
+      setStatus((current) =>
+        current
+          ? {
+              ...current,
+              assistantProviders
+            }
+          : current
+      );
+      await Promise.all([refreshStatus(), loadSystem()]);
+      pushToast(
+        'success',
+        'Provider switched',
+        `${assistantProviders.activeProvider?.name ?? 'Assistant'} is now active.`
+      );
+    } catch (requestError) {
+      const message = requestError instanceof Error ? requestError.message : 'Unable to switch provider.';
+      setError(message);
+      pushToast('error', 'Provider switch failed', message);
+    } finally {
+      setBusyLabel('');
+    }
+  }
+
+  async function handleProviderConnect(providerId: AssistantProviderId) {
+    setBusyLabel(`Connecting ${providerId === 'claude' ? 'Claude Code' : 'Codex'}...`);
+    try {
+      await service.connectProvider(providerId);
+      await Promise.all([refreshStatus(), loadSystem()]);
+      pushToast(
+        'success',
+        'Provider connected',
+        `${providerId === 'claude' ? 'Claude Code' : 'Codex'} is now available in this app.`
+      );
+    } catch (requestError) {
+      const message =
+        requestError instanceof Error ? requestError.message : 'Login to this provider first, then connect it here.';
+      setError(message);
+      pushToast('error', 'Connect failed', message);
+    } finally {
+      setBusyLabel('');
+    }
+  }
+
+  async function handleProviderDisconnect(providerId: AssistantProviderId) {
+    setBusyLabel(`Disconnecting ${providerId === 'claude' ? 'Claude Code' : 'Codex'}...`);
+    try {
+      await service.disconnectProvider(providerId);
+      setMessages([]);
+      await Promise.all([refreshStatus(), loadSystem()]);
+      pushToast(
+        'info',
+        `${providerId === 'claude' ? 'Claude Code' : 'Codex'} disconnected`,
+        'The app-level connection has been removed.'
+      );
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Unable to disconnect provider.');
+    } finally {
+      setBusyLabel('');
+    }
+  }
+
+  async function handleResetApp() {
+    if (
+      typeof window !== 'undefined' &&
+      !window.confirm(
+        'Reset VOCOD completely?\n\nThis clears workspace data, chat history, notes, approvals, settings, and app-connected providers.'
+      )
+    ) {
+      return;
+    }
+
+    setBusyLabel('Resetting VOCOD...');
+    setError('');
+
+    try {
+      cancelAssistantPlayback();
+      await service.resetApp();
+      setMessages([]);
+      setApprovals([]);
+      setTypedMessageText({});
+      setTypingTargets({});
+      setSpokenReplyPreview('');
+      setVoiceActivity(null);
+      setRecentVoiceActivities([]);
+      setProjectInput('');
+      setTextInput('');
+      setVoiceCommandPicker(null);
+      setOnboardingStep(1);
+      setOnboardingSelectedProviderId(null);
+      setActiveScreen('workspace');
+      await Promise.all([initialize(), loadSystem()]);
+      pushToast(
+        'info',
+        'VOCOD reset',
+        'All local app data has been cleared. Connect a provider again to continue.'
+      );
+    } catch (requestError) {
+      const message = requestError instanceof Error ? requestError.message : 'Unable to reset VOCOD.';
+      setError(message);
+      pushToast('error', 'Reset failed', message);
+    } finally {
+      setBusyLabel('');
     }
   }
 
@@ -813,13 +1372,35 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
   }
 
   function renderScreen() {
-    if (!codexReady) {
+    if (!assistantReady) {
       return (
         <OnboardingScreen
-          codexStatusText={status?.codexStatus.statusText ?? 'Waiting for a local Codex login session'}
-          commandValue={commandInput}
+          appSettings={effectiveAppSettings}
+          step={onboardingStep}
+          selectedProviderId={onboardingSelectedProviderId}
+          providers={status?.assistantProviders.providers ?? []}
+          onConnectProvider={(providerId) => {
+            void handleProviderConnect(providerId);
+          }}
           onRefresh={() => {
             void Promise.all([refreshStatus(), loadSystem()]);
+          }}
+          onSaveDisplayName={(displayName) => {
+            void handleOnboardingDisplayNameSubmit(displayName);
+          }}
+          onSelectProvider={(providerId) => {
+            setOnboardingSelectedProviderId(providerId);
+          }}
+          onContinueToInstructions={() => {
+            if (onboardingSelectedProviderId) {
+              setOnboardingStep(3);
+            }
+          }}
+          onBackToProviderChoice={() => {
+            setOnboardingStep(2);
+          }}
+          onBackToName={() => {
+            setOnboardingStep(1);
           }}
         />
       );
@@ -828,9 +1409,11 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     if (activeScreen === 'workspace') {
       return (
         <WorkspaceScreen
+          activeProviderName={getActiveProviderName(status)}
           projectInput={projectInput}
           workspace={status?.workspace ?? null}
           canBrowseProjectFolder={true}
+          isResetting={busyLabel === 'Resetting VOCOD...'}
           onProjectInputChange={setProjectInput}
           onBrowseProjectFolder={() => {
             void handleBrowseProjectFolder();
@@ -839,6 +1422,9 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
           onToggleWriteAccess={(enabled) => {
             void handleWriteAccess(enabled);
           }}
+          onResetApp={() => {
+            void handleResetApp();
+          }}
         />
       );
     }
@@ -846,8 +1432,16 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     if (activeScreen === 'voice') {
       return (
         <VoiceScreen
+          activeProviderName={getActiveProviderName(status)}
           audio={status?.audio ?? null}
+          busyLabel={busyLabel}
           codexSettings={codexSettings}
+          showCodexSettings={codexConnected}
+          narrationMode={narrationMode}
+          recentVoiceActivities={recentVoiceActivities}
+          spokenReplyPreview={spokenReplyPreview}
+          streamedTranscriptOverride={streamingVoiceDraft}
+          voiceActivity={voiceActivity}
           voiceSettings={voiceSettings}
           voiceSession={status?.voiceSession ?? null}
           voiceState={voiceState}
@@ -859,6 +1453,9 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
           }}
           onDismissCommandOptions={() => {
             setVoiceCommandPicker(null);
+          }}
+          onToggleMute={() => {
+            void toggleVoiceMute();
           }}
           onStart={() => {
             void handleStartVoice();
@@ -873,6 +1470,7 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     if (activeScreen === 'review') {
       return (
         <ReviewScreen
+          assistantLabel={getActiveProviderName(status)}
           pendingApproval={status?.pendingApproval ?? null}
           lastDiff={status?.lastDiff ?? null}
           approvalHistory={approvals}
@@ -887,7 +1485,7 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     }
 
     if (activeScreen === 'shell') {
-      return <ShellScreen cwd={status?.workspace.projectRoot ?? null} />;
+      return <ShellScreen cwd={status?.workspace.projectRoot ?? null} theme={currentTheme} />;
     }
 
     if (activeScreen === 'notes') {
@@ -916,11 +1514,17 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
 
     return (
       <TerminalScreen
+        active={activeScreen === 'terminal'}
+        assistantLabel={getActiveProviderName(status)}
         density={preferences.transcriptDensity}
         disabled={isSubmittingTurn}
-        messages={deferredMessages}
+        messages={renderedMessages}
         textInput={textInput}
+        voiceActive={Boolean(status?.voiceSession.active)}
         onTextInputChange={setTextInput}
+        onStartVoice={() => {
+          void handleStartVoice();
+        }}
         onSubmit={(event) => {
           void handleTextSubmit(event);
         }}
@@ -1042,12 +1646,7 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     }
 
     const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        noiseSuppression: true,
-        autoGainControl: true,
-        echoCancellation: false
-      },
+      audio: getDesktopAudioConstraints(voiceSettings?.settings),
       video: false
     });
 
@@ -1075,6 +1674,7 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     desktopMediaLastSpeechAtRef.current = Date.now();
     desktopSmoothedRmsRef.current = 0;
     desktopSpeechAboveThresholdMsRef.current = 0;
+    desktopAmbientRmsRef.current = 0;
     stoppingVoiceSessionRef.current = false;
 
     processor.onaudioprocess = (event) => {
@@ -1090,6 +1690,7 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
       const monoChunk = downmixChannels(channelData);
       if (monoChunk.length > 0) {
         desktopPcmChunksRef.current.push(monoChunk);
+        trimDesktopPreSpeechBuffer(audioContext.sampleRate);
       }
     };
 
@@ -1190,8 +1791,11 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     restartingRecognitionRef.current = false;
     stoppingVoiceSessionRef.current = true;
     transcriptDraftRef.current = '';
+    clearCurrentlySpokenText();
     clearSilenceTimer();
     cancelAssistantPlayback();
+    cancelNarrationPlayback();
+    clearVoiceActivity();
     if (desktopDeviceRestartTimeoutRef.current !== null) {
       window.clearTimeout(desktopDeviceRestartTimeoutRef.current);
       desktopDeviceRestartTimeoutRef.current = null;
@@ -1258,10 +1862,28 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
       analyser.getByteTimeDomainData(samples);
       const rms = computeTimeDomainRms(samples);
       const now = Date.now();
-      const smoothedRms = smoothRms(desktopSmoothedRmsRef.current, rms);
+      const vadTuning = getDesktopVadTuning(voiceSettings?.settings);
+      const smoothedRms = smoothRms(
+        desktopSmoothedRmsRef.current,
+        rms,
+        vadTuning.smoothingFactor
+      );
       desktopSmoothedRmsRef.current = smoothedRms;
+      const ambient = desktopAmbientRmsRef.current;
+      if (!desktopMediaHasSpeechRef.current || smoothedRms < vadTuning.sustainThreshold) {
+        desktopAmbientRmsRef.current =
+          ambient === 0 ? smoothedRms : ambient + (smoothedRms - ambient) * 0.08;
+      }
+      const adaptiveStartThreshold = Math.max(
+        vadTuning.startThreshold,
+        desktopAmbientRmsRef.current * vadTuning.ambientMultiplier + vadTuning.ambientPadding
+      );
+      const adaptiveSustainThreshold = Math.max(
+        vadTuning.sustainThreshold,
+        desktopAmbientRmsRef.current * (vadTuning.ambientMultiplier - 0.45) + vadTuning.ambientPadding * 0.7
+      );
 
-      if (smoothedRms >= desktopVadConfig.startThreshold) {
+      if (smoothedRms >= adaptiveStartThreshold) {
         desktopSpeechAboveThresholdMsRef.current += 140;
       } else {
         desktopSpeechAboveThresholdMsRef.current = 0;
@@ -1269,13 +1891,13 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
 
       if (
         !desktopMediaHasSpeechRef.current &&
-        desktopSpeechAboveThresholdMsRef.current >= desktopVadConfig.minSpeechMs
+        desktopSpeechAboveThresholdMsRef.current >= vadTuning.minSpeechMs
       ) {
         desktopMediaHasSpeechRef.current = true;
         desktopMediaLastSpeechAtRef.current = now;
       }
 
-      if (desktopMediaHasSpeechRef.current && smoothedRms >= desktopVadConfig.sustainThreshold) {
+      if (desktopMediaHasSpeechRef.current && smoothedRms >= adaptiveSustainThreshold) {
         desktopMediaLastSpeechAtRef.current = now;
       }
 
@@ -1330,6 +1952,24 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     desktopMediaHasSpeechRef.current = false;
     desktopSmoothedRmsRef.current = 0;
     desktopSpeechAboveThresholdMsRef.current = 0;
+    desktopAmbientRmsRef.current = 0;
+  }
+
+  function trimDesktopPreSpeechBuffer(sampleRate: number) {
+    if (desktopMediaHasSpeechRef.current) {
+      return;
+    }
+
+    const maxFrames = Math.max(1, Math.round((sampleRate * DESKTOP_CAPTURE_PREROLL_MS) / 1000));
+    let totalFrames = 0;
+
+    for (let index = desktopPcmChunksRef.current.length - 1; index >= 0; index -= 1) {
+      totalFrames += desktopPcmChunksRef.current[index]?.length ?? 0;
+      if (totalFrames > maxFrames) {
+        desktopPcmChunksRef.current.splice(0, index);
+        return;
+      }
+    }
   }
 
   async function transcribeDesktopVoiceAudio(audioBlob: Blob, mimeType: string) {
@@ -1448,8 +2088,11 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     restartingRecognitionRef.current = false;
     stoppingVoiceSessionRef.current = true;
     transcriptDraftRef.current = '';
+    clearCurrentlySpokenText();
     clearSilenceTimer();
     cancelAssistantPlayback();
+    cancelNarrationPlayback();
+    clearVoiceActivity();
 
     const recognition = recognitionRef.current;
     recognitionRef.current = null;
@@ -1478,8 +2121,41 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     }
   }
 
+  async function handleRateLimitVoiceExit(
+    transport: 'browser-webspeech' | 'desktop-media',
+    message: string
+  ) {
+    patchVoiceSession({
+      active: false,
+      phase: 'error',
+      liveTranscript: '',
+      error: message,
+      transport
+    });
+    setError(message);
+
+    if (shouldSpeakReplies()) {
+      try {
+        await playAssistantReply(message, {
+          allowBargeIn: false
+        });
+      } catch {
+        // Preserve the terminal error state even if TTS fails.
+      }
+    }
+
+    if (transport === 'desktop-media') {
+      await stopDesktopVoiceSession(false, false);
+      return;
+    }
+
+    await stopBrowserVoiceSession(false, false);
+  }
+
   function cancelAssistantPlayback() {
+    clearCurrentlySpokenText();
     stopBargeInMonitor();
+    cancelNarrationPlayback();
     playbackRunIdRef.current += 1;
     const abortPlayback = playbackAbortRef.current;
     playbackAbortRef.current = null;
@@ -1509,12 +2185,7 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          noiseSuppression: true,
-          autoGainControl: true,
-          echoCancellation: true
-        },
+        audio: getDesktopAudioConstraints(voiceSettings?.settings),
         video: false
       });
       const audioContext = new AudioContext();
@@ -1531,43 +2202,51 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
       bargeInAboveThresholdMsRef.current = 0;
       bargeInAmbientRmsRef.current = 0;
 
-      bargeInIntervalRef.current = window.setInterval(() => {
-        const activeAnalyser = bargeInAnalyserRef.current;
-        if (!activeAnalyser || bargeInTriggeredRef.current) {
-          return;
-        }
+      bargeInArmTimeoutRef.current = window.setTimeout(() => {
+        bargeInArmTimeoutRef.current = null;
+        bargeInIntervalRef.current = window.setInterval(() => {
+          const activeAnalyser = bargeInAnalyserRef.current;
+          if (!activeAnalyser || bargeInTriggeredRef.current) {
+            return;
+          }
 
-        const samples = new Uint8Array(activeAnalyser.fftSize);
-        activeAnalyser.getByteTimeDomainData(samples);
+          const samples = new Uint8Array(activeAnalyser.fftSize);
+          activeAnalyser.getByteTimeDomainData(samples);
 
-        let sumSquares = 0;
-        for (const sample of samples) {
-          const normalized = (sample - 128) / 128;
-          sumSquares += normalized * normalized;
-        }
+          let sumSquares = 0;
+          for (const sample of samples) {
+            const normalized = (sample - 128) / 128;
+            sumSquares += normalized * normalized;
+          }
 
-        const rms = Math.sqrt(sumSquares / samples.length);
+          const rms = Math.sqrt(sumSquares / samples.length);
+          const vadTuning = getDesktopVadTuning(voiceSettings?.settings);
 
-        const ambient = bargeInAmbientRmsRef.current;
-        if (ambient === 0) {
-          bargeInAmbientRmsRef.current = rms;
-        } else {
-          bargeInAmbientRmsRef.current = ambient + (rms - ambient) * 0.08;
-        }
+          const ambient = bargeInAmbientRmsRef.current;
+          if (ambient === 0) {
+            bargeInAmbientRmsRef.current = rms;
+          } else {
+            bargeInAmbientRmsRef.current = ambient + (rms - ambient) * 0.08;
+          }
 
-        const floor = Math.max(0.04, bargeInAmbientRmsRef.current);
-        const isSpeechSpike = rms > floor * 2.5 && rms > 0.06;
+          const adaptiveThreshold = Math.max(
+            vadTuning.startThreshold * 1.75,
+            bargeInAmbientRmsRef.current * (vadTuning.ambientMultiplier + 1) + vadTuning.ambientPadding + 0.006,
+            0.042
+          );
+          const isSpeechSpike = rms > adaptiveThreshold;
 
-        if (isSpeechSpike) {
-          bargeInAboveThresholdMsRef.current += 80;
-        } else {
-          bargeInAboveThresholdMsRef.current = 0;
-        }
+          if (isSpeechSpike) {
+            bargeInAboveThresholdMsRef.current += 80;
+          } else {
+            bargeInAboveThresholdMsRef.current = Math.max(0, bargeInAboveThresholdMsRef.current - 40);
+          }
 
-        if (bargeInAboveThresholdMsRef.current >= 400) {
-          void handleAssistantBargeIn();
-        }
-      }, 80);
+          if (bargeInAboveThresholdMsRef.current >= vadTuning.minSpeechMs + 260) {
+            void handleAssistantBargeIn();
+          }
+        }, 80);
+      }, BARGE_IN_ARM_DELAY_MS);
     } catch (error) {
       console.warn('[voice][barge-in] monitor_unavailable', error);
       stopBargeInMonitor();
@@ -1575,6 +2254,11 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
   }
 
   function stopBargeInMonitor() {
+    if (bargeInArmTimeoutRef.current !== null) {
+      window.clearTimeout(bargeInArmTimeoutRef.current);
+      bargeInArmTimeoutRef.current = null;
+    }
+
     if (bargeInIntervalRef.current !== null) {
       window.clearInterval(bargeInIntervalRef.current);
       bargeInIntervalRef.current = null;
@@ -1610,6 +2294,7 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     });
     pushToast('info', 'Reply interrupted', 'Listening again.');
     cancelAssistantPlayback();
+    clearVoiceActivity();
     voiceLatencyTraceRef.current?.finish('cancelled', { reason: 'barge_in' });
     voiceLatencyTraceRef.current = null;
     awaitingVoiceReplyRef.current = false;
@@ -1796,6 +2481,7 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     });
     awaitingVoiceReplyRef.current = true;
     transcriptDraftRef.current = '';
+    clearVoiceActivity();
 
     patchVoiceSession({
       active: true,
@@ -1809,6 +2495,7 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     recognitionRef.current?.stop();
 
     setBusyLabel('Transcribing...');
+    playUiCue('turn_end');
     patchVoiceSession({
       active: true,
       phase: 'thinking',
@@ -1825,22 +2512,27 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
         });
         const commandResult = await service.resolveVoiceCommand(transcript);
         if (commandResult.status !== 'no_match') {
+          const speakCommandReply = shouldSpeakReplies();
           trace.mark('command_route_completed', {
             resultType: commandResult.status,
             assistantLength: commandResult.assistantMessage.text.length,
             localCommand: true
           });
           applyVoiceCommandUi(commandResult);
-          await Promise.all([refreshStatus(), loadApprovals(), loadCodexSettings()]);
+          await Promise.all([refreshStatus(), loadApprovals(), loadCodexSettings(), loadClaudeSettings()]);
 
           patchVoiceSession({
             active: true,
-            phase: 'speaking',
+            phase: speakCommandReply ? 'speaking' : 'thinking',
             liveTranscript: '',
             error: null,
             transport: 'browser-webspeech'
           });
-          await playAssistantReply(commandResult.assistantMessage.text);
+          if (speakCommandReply) {
+            await playAssistantReply(commandResult.assistantMessage.text, {
+              allowBargeIn: false
+            });
+          }
           awaitingVoiceReplyRef.current = false;
 
           const shouldResume =
@@ -1869,11 +2561,17 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
       trace.mark('chat_request_started', {
         transcriptLength: transcript.length
       });
-      const streamedPlayback = createStreamedAssistantReplyPlayer('browser-webspeech', {
-        allowBargeIn: true
-      });
+      const speakReplies = shouldSpeakReplies();
+      const streamedPlayback = speakReplies
+        ? createStreamedAssistantReplyPlayer('browser-webspeech', {
+            allowBargeIn: true
+          })
+        : null;
       const result = await streamChatMessage(transcript, 'voice', {
         voiceTurnId: trace.id,
+        onStarted: (event) => {
+          activeVoiceAssistantMessageIdRef.current = event.assistantMessage.id;
+        },
         onDelta: (event) => {
           patchVoiceSession({
             active: true,
@@ -1882,7 +2580,10 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
             error: null,
             transport: 'browser-webspeech'
           });
-          streamedPlayback.append(event.assistantMessage.text);
+          streamedPlayback?.append(event.assistantMessage.text);
+        },
+        onActivity: (event) => {
+          applyVoiceActivity(event.activity);
         }
       });
       trace.mark('chat_request_completed', {
@@ -1891,17 +2592,19 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
       });
       await Promise.all([refreshStatus(), loadApprovals()]);
 
-      setBusyLabel('Speaking...');
+      setBusyLabel(speakReplies ? 'Speaking...' : 'Wrapping up...');
       if (result.type === 'approval_required') {
-        streamedPlayback.cancel();
+        streamedPlayback?.cancel();
         patchVoiceSession({
           active: true,
-          phase: 'speaking',
+          phase: speakReplies ? 'speaking' : 'thinking',
           liveTranscript: '',
           error: null,
           transport: 'browser-webspeech'
         });
-        await playAssistantReply(result.assistantMessage.text);
+        if (speakReplies) {
+          await playAssistantReply(result.assistantMessage.text);
+        }
         startTransition(() => {
           setActiveScreen('review');
         });
@@ -1913,7 +2616,10 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
         setActiveScreen('voice');
       });
 
-      const playback = await streamedPlayback.complete(result.assistantMessage.text);
+      const playback = streamedPlayback
+        ? await streamedPlayback.complete(result.assistantMessage.text)
+        : await completeMutedStreamedReply('browser-webspeech', result.assistantMessage.text);
+      activeVoiceAssistantMessageIdRef.current = null;
 
       if (playback.interrupted) {
         return;
@@ -1957,6 +2663,11 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
         error: requestError instanceof Error ? requestError.message : 'Unable to send voice turn.'
       });
       voiceLatencyTraceRef.current = null;
+      activeVoiceAssistantMessageIdRef.current = null;
+      if (errorKind === 'rate_limit') {
+        await handleRateLimitVoiceExit('browser-webspeech', friendlyMessage);
+        return;
+      }
       patchVoiceSession({
         active: false,
         phase: 'error',
@@ -1965,7 +2676,9 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
         transport: 'browser-webspeech'
       });
       setError(friendlyMessage);
-      void playAssistantReply(friendlyMessage);
+      if (shouldSpeakReplies()) {
+        void playAssistantReply(friendlyMessage);
+      }
     } finally {
       setBusyLabel('');
     }
@@ -1992,6 +2705,7 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     }
     awaitingVoiceReplyRef.current = true;
     transcriptDraftRef.current = '';
+    clearVoiceActivity();
 
     patchVoiceSession({
       active: true,
@@ -2003,6 +2717,7 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     });
 
     setBusyLabel('Transcribing...');
+    playUiCue('turn_end');
 
     try {
       if (looksLikeVoiceCommand(transcript)) {
@@ -2012,22 +2727,25 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
         });
         const commandResult = await service.resolveVoiceCommand(transcript);
         if (commandResult.status !== 'no_match') {
+          const speakCommandReply = shouldSpeakReplies();
           trace.mark('command_route_completed', {
             resultType: commandResult.status,
             assistantLength: commandResult.assistantMessage.text.length,
             localCommand: true
           });
           applyVoiceCommandUi(commandResult);
-          await Promise.all([refreshStatus(), loadApprovals(), loadCodexSettings()]);
+          await Promise.all([refreshStatus(), loadApprovals(), loadCodexSettings(), loadClaudeSettings()]);
 
           patchVoiceSession({
             active: true,
-            phase: 'speaking',
+            phase: speakCommandReply ? 'speaking' : 'thinking',
             liveTranscript: '',
             error: null,
             transport: 'desktop-media'
           });
-          await playAssistantReply(commandResult.assistantMessage.text);
+          if (speakCommandReply) {
+            await playAssistantReply(commandResult.assistantMessage.text);
+          }
           awaitingVoiceReplyRef.current = false;
 
           const shouldResume =
@@ -2056,11 +2774,18 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
       trace.mark('chat_request_started', {
         transcriptLength: transcript.length
       });
-      const streamedPlayback = createStreamedAssistantReplyPlayer('desktop-media', {
-        allowBargeIn: true
-      });
+      const speakReplies = shouldSpeakReplies();
+      const streamedPlayback = speakReplies
+        ? createStreamedAssistantReplyPlayer('desktop-media', {
+            allowBargeIn: true,
+            startDelayMs: STREAMED_TTS_START_DELAY_MS
+          })
+        : null;
       const result = await streamChatMessage(transcript, 'voice', {
         voiceTurnId: trace.id,
+        onStarted: (event) => {
+          activeVoiceAssistantMessageIdRef.current = event.assistantMessage.id;
+        },
         onDelta: (event) => {
           patchVoiceSession({
             active: true,
@@ -2069,7 +2794,10 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
             error: null,
             transport: 'desktop-media'
           });
-          streamedPlayback.append(event.assistantMessage.text);
+          streamedPlayback?.append(event.assistantMessage.text);
+        },
+        onActivity: (event) => {
+          applyVoiceActivity(event.activity);
         }
       });
       trace.mark('chat_request_completed', {
@@ -2078,17 +2806,21 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
       });
       await Promise.all([refreshStatus(), loadApprovals()]);
 
-      setBusyLabel('Speaking...');
+      setBusyLabel(speakReplies ? 'Speaking...' : 'Wrapping up...');
       if (result.type === 'approval_required') {
-        streamedPlayback.cancel();
+        streamedPlayback?.cancel();
         patchVoiceSession({
           active: true,
-          phase: 'speaking',
+          phase: speakReplies ? 'speaking' : 'thinking',
           liveTranscript: '',
           error: null,
           transport: 'desktop-media'
         });
-        await playAssistantReply(result.assistantMessage.text);
+        if (speakReplies) {
+          await playAssistantReply(result.assistantMessage.text, {
+            allowBargeIn: false
+          });
+        }
         startTransition(() => {
           setActiveScreen('review');
         });
@@ -2100,7 +2832,10 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
         setActiveScreen('voice');
       });
 
-      const playback = await streamedPlayback.complete(result.assistantMessage.text);
+      const playback = streamedPlayback
+        ? await streamedPlayback.complete(result.assistantMessage.text)
+        : await completeMutedStreamedReply('desktop-media', result.assistantMessage.text);
+      activeVoiceAssistantMessageIdRef.current = null;
 
       if (playback.interrupted) {
         return;
@@ -2140,6 +2875,11 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
         error: requestError instanceof Error ? requestError.message : 'Unable to send voice turn.'
       });
       voiceLatencyTraceRef.current = null;
+      activeVoiceAssistantMessageIdRef.current = null;
+      if (errorKind === 'rate_limit') {
+        await handleRateLimitVoiceExit('desktop-media', friendlyMessage);
+        return;
+      }
       patchVoiceSession({
         active: false,
         phase: 'error',
@@ -2148,7 +2888,11 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
         transport: 'desktop-media'
       });
       setError(friendlyMessage);
-      void playAssistantReply(friendlyMessage);
+      if (shouldSpeakReplies()) {
+        void playAssistantReply(friendlyMessage, {
+          allowBargeIn: false
+        });
+      }
     } finally {
       setBusyLabel('');
     }
@@ -2160,6 +2904,16 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
       allowBargeIn?: boolean;
     } = {}
   ) {
+    if (!shouldSpeakReplies()) {
+      voiceLatencyTraceRef.current?.finish('completed', {
+        playback: 'muted'
+      });
+      voiceLatencyTraceRef.current = null;
+      return {
+        interrupted: false
+      };
+    }
+
     const trace = voiceLatencyTraceRef.current;
     const spokenText = createSpeechSafeReply(text);
     const chunks = splitSpeechIntoChunks(spokenText);
@@ -2220,11 +2974,19 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     transport: 'browser-webspeech' | 'desktop-media',
     options: {
       allowBargeIn?: boolean;
+      startDelayMs?: number;
     } = {}
   ) {
     const trace = voiceLatencyTraceRef.current ?? undefined;
     const allowBargeIn = Boolean(options.allowBargeIn);
+    const startDelayMs = Math.max(0, options.startDelayMs ?? 0);
+    const speakAfterAt = Date.now() + startDelayMs;
     const playbackRunId = beginAssistantPlaybackRun();
+    const scheduler = createGeneratedAudioScheduler({
+      trace,
+      playbackRunId,
+      allowBargeIn
+    });
     const pendingChunks: string[] = [];
     const safeSnapshots = {
       latest: '',
@@ -2233,6 +2995,7 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     let enqueuedChunkCount = 0;
     let playedChunkCount = 0;
     let finished = false;
+    let playbackPrimed = false;
     let failureMessage: string | null = null;
     let processingPromise: Promise<void> | null = null;
     let wakeProcessor: (() => void) | null = null;
@@ -2254,6 +3017,20 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
       }
 
       const allChunks = getSpeakableStreamChunks(safeText, isFinal);
+      if (
+        !playbackPrimed &&
+        !isFinal &&
+        allChunks.length > 0 &&
+        allChunks.length < STREAMED_TTS_MIN_CHUNKS &&
+        safeText.length < STREAMED_TTS_MIN_CHARS
+      ) {
+        return;
+      }
+
+      if (allChunks.length > 0 || isFinal) {
+        playbackPrimed = true;
+      }
+
       const nextChunks = allChunks.slice(enqueuedChunkCount);
       if (nextChunks.length > 0) {
         pendingChunks.push(...nextChunks);
@@ -2291,6 +3068,15 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
 
           const chunk = pendingChunks.shift()!;
           try {
+            if (playedChunkCount === 0 && Date.now() < speakAfterAt) {
+              await new Promise((resolve) => {
+                window.setTimeout(resolve, speakAfterAt - Date.now());
+              });
+              if (!isPlaybackRunActive(playbackRunId)) {
+                return;
+              }
+            }
+
             if (!trace?.hasMark('tts_request_started')) {
               trace?.mark('tts_request_started', {
                 textLength: safeSnapshots.latest.length,
@@ -2298,17 +3084,12 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
               });
             }
 
-            const synthesis = await synthesizeSpeechChunk(
+            const preparedChunk = await prepareGeneratedSpeechChunk(
               chunk,
+              scheduler,
               trace,
               playedChunkCount === 0 ? 0 : undefined
             );
-
-            if (!synthesis.audioBase64 || !synthesis.mimeType) {
-              throw new Error(
-                synthesis.error ?? `Backend TTS provider ${synthesis.provider} was unavailable.`
-              );
-            }
 
             setBusyLabel('Speaking...');
             patchVoiceSession({
@@ -2319,14 +3100,14 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
               transport
             });
 
-            await playGeneratedAudioBlob(synthesis.audioBase64, synthesis.mimeType, {
+            scheduler.enqueue(preparedChunk.audioBuffer, {
               trace,
               playbackRunId,
               allowBargeIn,
               markPlaybackStart: playedChunkCount === 0,
-              finishTraceOnEnd: false,
               chunkIndex: playedChunkCount,
-              chunkCount: Math.max(enqueuedChunkCount, playedChunkCount + 1)
+              chunkCount: Math.max(enqueuedChunkCount, playedChunkCount + 1),
+              spokenText: chunk
             });
             playedChunkCount += 1;
           } catch (error) {
@@ -2351,11 +3132,13 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
       },
       cancel() {
         finished = true;
+        scheduler.cancel();
         notifyProcessor();
       },
       async complete(finalText: string) {
         updateQueueFromSnapshot(finalText, true);
         await processQueue();
+        await scheduler.waitUntilDrained();
 
         if (!isPlaybackRunActive(playbackRunId) || bargeInTriggeredRef.current) {
           return {
@@ -2401,18 +3184,24 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     playbackRunId: number,
     allowBargeIn: boolean
   ) {
+    const scheduler = createGeneratedAudioScheduler({
+      trace,
+      playbackRunId,
+      allowBargeIn
+    });
     let currentChunkIndex = 0;
     let playedChunkCount = 0;
     let nextSynthesisPromise:
-      | Promise<Awaited<ReturnType<typeof synthesizeSpeechChunk>>>
-      | null = synthesizeSpeechChunk(chunks[currentChunkIndex]!, trace, currentChunkIndex);
+      | Promise<Awaited<ReturnType<typeof prepareGeneratedSpeechChunk>>>
+      | null = prepareGeneratedSpeechChunk(chunks[currentChunkIndex]!, scheduler, trace, currentChunkIndex);
 
     while (nextSynthesisPromise) {
-      let synthesis;
+      let preparedChunk;
       try {
-        synthesis = await nextSynthesisPromise;
+        preparedChunk = await nextSynthesisPromise;
       } catch (error) {
         if (playedChunkCount > 0 && isPlaybackRunActive(playbackRunId)) {
+          await scheduler.waitUntilDrained();
           const remainingText = chunks.slice(currentChunkIndex).join(' ');
           if (remainingText) {
             await playBrowserSpeechSynthesis(remainingText, trace, playbackRunId, allowBargeIn);
@@ -2422,41 +3211,38 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
         throw error;
       }
       if (!isPlaybackRunActive(playbackRunId)) {
+        scheduler.cancel();
         return;
-      }
-
-      if (!synthesis.audioBase64 || !synthesis.mimeType) {
-        const backendTtsError =
-          synthesis.error ?? `Backend TTS provider ${synthesis.provider} was unavailable.`;
-        console.warn('[voice][tts] backend_fallback_to_browser', {
-          provider: synthesis.provider,
-          error: backendTtsError
-        });
-        pushToast('info', 'Browser voice fallback active', backendTtsError);
-        const remainingText = chunks.slice(currentChunkIndex).join(' ');
-        if (playedChunkCount > 0 && remainingText) {
-          await playBrowserSpeechSynthesis(remainingText, trace, playbackRunId, allowBargeIn);
-          return;
-        }
-        throw new Error(backendTtsError);
       }
 
       currentChunkIndex += 1;
       const hasMoreChunks = currentChunkIndex < chunks.length;
-      nextSynthesisPromise = hasMoreChunks
-        ? synthesizeSpeechChunk(chunks[currentChunkIndex]!, trace, currentChunkIndex)
+
+      const nextChunkPromise = hasMoreChunks
+        ? prepareGeneratedSpeechChunk(chunks[currentChunkIndex]!, scheduler, trace, currentChunkIndex)
         : null;
 
-      await playGeneratedAudioBlob(synthesis.audioBase64, synthesis.mimeType, {
+      nextSynthesisPromise = nextChunkPromise;
+
+      scheduler.enqueue(preparedChunk.audioBuffer, {
         trace,
         playbackRunId,
         allowBargeIn,
         markPlaybackStart: currentChunkIndex === 1,
-        finishTraceOnEnd: !hasMoreChunks,
         chunkIndex: currentChunkIndex - 1,
-        chunkCount: chunks.length
+        chunkCount: chunks.length,
+        spokenText: chunks[currentChunkIndex - 1]!
       });
       playedChunkCount += 1;
+    }
+
+    await scheduler.waitUntilDrained();
+    if (isPlaybackRunActive(playbackRunId) && !bargeInTriggeredRef.current) {
+      trace?.finish('completed', {
+        playback: 'generated-audio-sentences',
+        chunkCount: playedChunkCount
+      });
+      voiceLatencyTraceRef.current = null;
     }
   }
 
@@ -2477,97 +3263,222 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     return synthesis;
   }
 
-  async function playGeneratedAudioBlob(
-    audioBase64: string,
-    mimeType: string,
-    options: {
+  async function prepareGeneratedSpeechChunk(
+    text: string,
+    scheduler: ReturnType<typeof createGeneratedAudioScheduler>,
+    trace?: VoiceLatencyTrace,
+    chunkIndex?: number
+  ) {
+    const synthesis = await synthesizeSpeechChunk(text, trace, chunkIndex);
+    if (!synthesis.audioBase64) {
+      const backendTtsError =
+        synthesis.error ?? `Backend TTS provider ${synthesis.provider} was unavailable.`;
+      console.warn('[voice][tts] backend_fallback_to_browser', {
+        provider: synthesis.provider,
+        error: backendTtsError
+      });
+      pushToast('info', 'Browser voice fallback active', backendTtsError);
+      throw new Error(backendTtsError);
+    }
+
+    return {
+      audioBuffer: await scheduler.decode(synthesis.audioBase64),
+      provider: synthesis.provider
+    };
+  }
+
+  function createGeneratedAudioScheduler(options: {
       trace?: VoiceLatencyTrace;
       playbackRunId: number;
       allowBargeIn: boolean;
-      markPlaybackStart: boolean;
-      finishTraceOnEnd: boolean;
-      chunkIndex: number;
-      chunkCount: number;
+    }) {
+    if (typeof AudioContext === 'undefined') {
+      throw new Error('Web Audio playback is unavailable in this runtime.');
     }
-  ) {
-    if (!isPlaybackRunActive(options.playbackRunId)) {
-      return;
-    }
-    const audioBytes = Uint8Array.from(atob(audioBase64), (character) => character.charCodeAt(0));
-    const audioBlob = new Blob([audioBytes], { type: mimeType });
-    const blobUrl = URL.createObjectURL(audioBlob);
 
-    await new Promise<void>((resolve, reject) => {
-      const audio = new Audio(blobUrl);
-      playbackAudioRef.current = audio;
-      let settled = false;
+    const audioContext = new AudioContext();
+    let scheduledUntil = audioContext.currentTime;
+    let startedPlayback = false;
+    let startTimer: number | null = null;
+    const chunkStartTimers = new Set<number>();
+    let lastChunkEnd = Promise.resolve();
+    let resolveDrain: (() => void) | null = null;
+    const activeSources = new Set<AudioBufferSourceNode>();
+    let cleanedUp = false;
 
-      const cleanup = () => {
-        if (settled) {
+    const cleanup = () => {
+      if (cleanedUp) {
+        return;
+      }
+      cleanedUp = true;
+      if (startTimer !== null) {
+        window.clearTimeout(startTimer);
+        startTimer = null;
+      }
+      for (const timerId of chunkStartTimers) {
+        window.clearTimeout(timerId);
+      }
+      chunkStartTimers.clear();
+      if (playbackAbortRef.current === cancel) {
+        playbackAbortRef.current = null;
+      }
+      clearCurrentlySpokenText();
+      if (resolveDrain) {
+        resolveDrain();
+        resolveDrain = null;
+      }
+      for (const source of activeSources) {
+        source.onended = null;
+        try {
+          source.stop();
+        } catch {
+          // Ignore stop errors during teardown.
+        }
+      }
+      activeSources.clear();
+      void audioContext.close().catch(() => undefined);
+    };
+
+    const cancel = () => {
+      cleanup();
+    };
+
+    playbackAbortRef.current = cancel;
+
+    return {
+      async decode(audioBase64: string) {
+        if (cleanedUp) {
+          throw new Error('scheduler_cancelled');
+        }
+        const audioBytes = Uint8Array.from(atob(audioBase64), (character) => character.charCodeAt(0));
+        const arrayBuffer = audioBytes.buffer.slice(
+          audioBytes.byteOffset,
+          audioBytes.byteOffset + audioBytes.byteLength
+        ) as ArrayBuffer;
+        if (audioContext.state === 'suspended') {
+          await audioContext.resume().catch(() => undefined);
+        }
+        if (cleanedUp) {
+          throw new Error('scheduler_cancelled');
+        }
+        const decoded = await audioContext.decodeAudioData(arrayBuffer);
+        return trimGeneratedAudioBuffer(audioContext, decoded);
+      },
+      enqueue(
+        audioBuffer: AudioBuffer,
+        meta: {
+          trace?: VoiceLatencyTrace;
+          playbackRunId: number;
+          allowBargeIn: boolean;
+          markPlaybackStart: boolean;
+          chunkIndex: number;
+          chunkCount: number;
+          spokenText: string;
+        }
+      ) {
+        if (cleanedUp || !isPlaybackRunActive(meta.playbackRunId)) {
           return;
         }
-        settled = true;
-        if (playbackAbortRef.current === abortPlayback) {
-          playbackAbortRef.current = null;
-        }
-        if (playbackAudioRef.current === audio) {
-          playbackAudioRef.current = null;
-        }
-        audio.onended = null;
-        audio.onerror = null;
-        audio.onplay = null;
-        URL.revokeObjectURL(blobUrl);
-      };
 
-      const abortPlayback = () => {
-        audio.pause();
-        audio.src = '';
-        cleanup();
-        resolve();
-      };
+        const source = audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(audioContext.destination);
 
-      playbackAbortRef.current = abortPlayback;
+        const startAt = Math.max(audioContext.currentTime + 0.02, scheduledUntil);
+        scheduledUntil = startAt + audioBuffer.duration;
 
-      audio.onended = () => {
-        cleanup();
-        if (options.finishTraceOnEnd) {
-          options.trace?.finish('completed', {
-            playback: 'generated-audio-sentences',
-            chunkCount: options.chunkCount
-          });
-          voiceLatencyTraceRef.current = null;
-        }
-        resolve();
-      };
-
-      audio.onerror = () => {
-        cleanup();
-        options.trace?.finish('error', {
-          stage: 'playback',
-          playback: 'generated-audio-sentences',
-          chunkIndex: options.chunkIndex
+        lastChunkEnd = new Promise<void>((resolve) => {
+          resolveDrain = resolve;
+          source.onended = () => {
+            activeSources.delete(source);
+            if (resolveDrain === resolve) {
+              resolveDrain = null;
+            }
+            resolve();
+          };
         });
-        voiceLatencyTraceRef.current = null;
-        reject(new Error('Generated assistant audio could not be played.'));
-      };
 
-      void audio.play().catch((error) => {
-        cleanup();
-        reject(error);
-      });
-
-      audio.onplay = () => {
-        if (options.markPlaybackStart) {
-          options.trace?.mark('playback_started', {
-            playback: 'generated-audio-sentences',
-            chunkCount: options.chunkCount
-          });
-          if (options.allowBargeIn) {
-            void startBargeInMonitor();
+        activeSources.add(source);
+        source.start(startAt);
+        const chunkStartTimer = window.setTimeout(() => {
+          chunkStartTimers.delete(chunkStartTimer);
+          if (!cleanedUp && isPlaybackRunActive(meta.playbackRunId)) {
+            setCurrentlySpokenText(meta.spokenText);
           }
+        }, Math.max(0, (startAt - audioContext.currentTime) * 1000));
+        chunkStartTimers.add(chunkStartTimer);
+
+        if (!startedPlayback && meta.markPlaybackStart) {
+          startedPlayback = true;
+          startTimer = window.setTimeout(() => {
+            if (!cleanedUp && isPlaybackRunActive(meta.playbackRunId)) {
+              meta.trace?.mark('playback_started', {
+                playback: 'generated-audio-sentences',
+                chunkCount: meta.chunkCount
+              });
+              if (meta.allowBargeIn) {
+                void startBargeInMonitor();
+              }
+            }
+          }, Math.max(0, (startAt - audioContext.currentTime) * 1000));
         }
-      };
-    });
+      },
+      async waitUntilDrained() {
+        await lastChunkEnd;
+        cleanup();
+      },
+      cancel
+    };
+  }
+
+  function trimGeneratedAudioBuffer(audioContext: AudioContext, input: AudioBuffer) {
+    const sampleRate = input.sampleRate;
+    const maxLeadingTrimFrames = Math.floor(sampleRate * 0.12);
+    const maxTrailingTrimFrames = Math.floor(sampleRate * 0.18);
+    const threshold = 0.0025;
+    let firstFrame = 0;
+    let lastFrame = input.length - 1;
+
+    for (let frame = 0; frame < Math.min(input.length, maxLeadingTrimFrames); frame += 1) {
+      let frameHasSignal = false;
+      for (let channel = 0; channel < input.numberOfChannels; channel += 1) {
+        if (Math.abs(input.getChannelData(channel)[frame] ?? 0) > threshold) {
+          frameHasSignal = true;
+          break;
+        }
+      }
+      if (frameHasSignal) {
+        firstFrame = frame;
+        break;
+      }
+    }
+
+    for (let frame = input.length - 1; frame >= Math.max(0, input.length - maxTrailingTrimFrames); frame -= 1) {
+      let frameHasSignal = false;
+      for (let channel = 0; channel < input.numberOfChannels; channel += 1) {
+        if (Math.abs(input.getChannelData(channel)[frame] ?? 0) > threshold) {
+          frameHasSignal = true;
+          break;
+        }
+      }
+      if (frameHasSignal) {
+        lastFrame = frame;
+        break;
+      }
+    }
+
+    if (firstFrame === 0 && lastFrame === input.length - 1) {
+      return input;
+    }
+
+    const trimmedLength = Math.max(1, lastFrame - firstFrame + 1);
+    const trimmed = audioContext.createBuffer(input.numberOfChannels, trimmedLength, sampleRate);
+    for (let channel = 0; channel < input.numberOfChannels; channel += 1) {
+      const source = input.getChannelData(channel).subarray(firstFrame, lastFrame + 1);
+      trimmed.copyToChannel(source, channel, 0);
+    }
+
+    return trimmed;
   }
 
   function playBrowserSpeechSynthesis(
@@ -2609,6 +3520,7 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
       };
       playbackAbortRef.current = abortPlayback;
       utterance.onstart = () => {
+        setCurrentlySpokenText(text);
         if (!trace || !trace.hasMark('playback_started')) {
           trace?.mark('playback_started', {
             playback: 'browser-speech'
@@ -2619,6 +3531,7 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
         }
       };
       utterance.onend = () => {
+        clearCurrentlySpokenText();
         if (playbackAbortRef.current === abortPlayback) {
           playbackAbortRef.current = null;
         }
@@ -2629,6 +3542,7 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
         resolve();
       };
       utterance.onerror = () => {
+        clearCurrentlySpokenText();
         if (playbackAbortRef.current === abortPlayback) {
           playbackAbortRef.current = null;
         }
@@ -2662,8 +3576,22 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     const normalized = text
       .replace(/```[\s\S]*?```/g, ' code block omitted. ')
       .replace(/`([^`]+)`/g, '$1')
+      .replace(/#{1,6}\s*/g, '')
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/\*([^*]+)\*/g, '$1')
+      .replace(/__([^_]+)__/g, '$1')
+      .replace(/_([^_]+)_/g, '$1')
+      .replace(/~~([^~]+)~~/g, '$1')
+      .replace(/^[-*+]\s+/gm, '')
+      .replace(/^\d+\.\s+/gm, '')
+      .replace(/^>\s*/gm, '')
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+      .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+      .replace(/\|/g, ', ')
+      .replace(/---+/g, '')
       .replace(/\b\/(?:Users|home|var|tmp|opt|private)(?:\/[^\s,.;:()]+)+/g, 'a local path')
       .replace(/\b(?:[A-Za-z0-9_.-]+\/){2,}[A-Za-z0-9_.-]+\b/g, 'a file path')
+      .replace(/[{}[\]<>]/g, '')
       .replace(/\s+/g, ' ')
       .trim();
 
@@ -2693,12 +3621,191 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
     return splitSpeechIntoChunks(normalized.slice(0, lastBoundaryIndex + 1));
   }
 
+  function clearVoiceActivity() {
+    setVoiceActivity(null);
+    setRecentVoiceActivities([]);
+  }
+
+  function setCurrentlySpokenText(text: string) {
+    setSpokenReplyPreview(text.trim());
+  }
+
+  function clearCurrentlySpokenText() {
+    setSpokenReplyPreview('');
+  }
+
+  function applyVoiceActivity(activity: string) {
+    const trimmed = activity.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    setVoiceActivity(trimmed);
+    setRecentVoiceActivities((current) =>
+      [trimmed, ...current.filter((item) => item !== trimmed)].slice(0, MAX_VOICE_ACTIVITY_ITEMS)
+    );
+    maybeNarrateActivity(trimmed);
+  }
+
+  function shouldSpeakReplies() {
+    return (voiceSettings?.settings.narrationMode ?? 'narrated') !== 'muted';
+  }
+
+  function shouldNarrateActivity() {
+    return narrationModeRef.current === 'narrated';
+  }
+
+  function cancelNarrationPlayback() {
+    narrationUtteranceRef.current = null;
+    if (narrationAudioRef.current) {
+      narrationAudioRef.current.pause();
+      narrationAudioRef.current.src = '';
+      narrationAudioRef.current = null;
+    }
+  }
+
+  function maybeNarrateActivity(activity: string) {
+    if (
+      !shouldNarrateActivity() ||
+      playbackAbortRef.current ||
+      narrationAudioRef.current ||
+      status?.voiceSession.phase === 'speaking'
+    ) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now < narrationCooldownUntilRef.current) {
+      return;
+    }
+
+    const phrase = toNarratedActivityPhrase(activity);
+    if (!phrase) {
+      return;
+    }
+
+    narrationCooldownUntilRef.current = now + NARRATION_COOLDOWN_MS;
+    void narrateViaKokoro(phrase);
+  }
+
+  async function narrateViaKokoro(phrase: string) {
+    try {
+      const synthesis = await service.synthesizeSpeech(phrase);
+      if (!synthesis.audioBase64 || !synthesis.mimeType || playbackAbortRef.current) {
+        return;
+      }
+
+      const audioBytes = Uint8Array.from(atob(synthesis.audioBase64), (c) => c.charCodeAt(0));
+      const audioBlob = new Blob([audioBytes], { type: synthesis.mimeType });
+      const blobUrl = URL.createObjectURL(audioBlob);
+      const audio = new Audio(blobUrl);
+      narrationAudioRef.current = audio;
+
+      audio.onended = () => {
+        if (narrationAudioRef.current === audio) {
+          narrationAudioRef.current = null;
+        }
+        URL.revokeObjectURL(blobUrl);
+      };
+      audio.onerror = () => {
+        if (narrationAudioRef.current === audio) {
+          narrationAudioRef.current = null;
+        }
+        URL.revokeObjectURL(blobUrl);
+      };
+      void audio.play().catch(() => {
+        narrationAudioRef.current = null;
+        URL.revokeObjectURL(blobUrl);
+      });
+    } catch {
+      narrationAudioRef.current = null;
+    }
+  }
+
+  function toNarratedActivityPhrase(activity: string) {
+    const lower = activity.toLowerCase();
+    if (lower.startsWith('reading ')) {
+      return `Let me read ${activity.slice('Reading '.length)} first.`;
+    }
+
+    if (lower.startsWith('editing ')) {
+      return `I found the right spot. Updating ${activity.slice('Editing '.length)} now.`;
+    }
+
+    if (lower.startsWith('searching ')) {
+      return 'Searching around a bit more for context.';
+    }
+
+    if (lower.startsWith('scanning ')) {
+      return 'Scanning the related files now.';
+    }
+
+    if (lower.startsWith('running ')) {
+      return `Running a quick check: ${activity.slice('Running '.length)}.`;
+    }
+
+    if (lower.startsWith('planning ')) {
+      return 'Let me map out the approach.';
+    }
+
+    if (lower.startsWith('thinking ')) {
+      return 'Thinking this through out loud.';
+    }
+
+    if (lower.startsWith('using ')) {
+      return `Using ${activity.slice('Using '.length)} for a quick check.`;
+    }
+
+    return activity;
+  }
+
+  async function toggleVoiceMute() {
+    if (!voiceSettings) {
+      return;
+    }
+
+    const currentMode = voiceSettings?.settings.narrationMode ?? 'narrated';
+    const nextMode =
+      currentMode === 'muted' ? previousAudibleNarrationModeRef.current : 'muted';
+    await handleVoiceSettingChange('narrationMode', nextMode);
+    pushToast(
+      'info',
+      nextMode === 'muted' ? 'Voice muted' : 'Voice restored',
+      nextMode === 'muted'
+        ? 'Activity updates and spoken replies are now text-only.'
+        : nextMode === 'silent_progress'
+          ? 'Progress stays on-screen and final replies will be spoken.'
+          : `${getActiveProviderName(status)} will narrate progress again.`
+    );
+  }
+
+  async function completeMutedStreamedReply(
+    transport: 'browser-webspeech' | 'desktop-media',
+    finalText: string
+  ) {
+    clearCurrentlySpokenText();
+    patchVoiceSession({
+      active: true,
+      phase: 'thinking',
+      liveTranscript: finalText,
+      error: null,
+      transport
+    });
+    voiceLatencyTraceRef.current?.finish('completed', {
+      playback: 'muted'
+    });
+    voiceLatencyTraceRef.current = null;
+    return {
+      interrupted: false
+    };
+  }
+
   return (
-    <div className={`app-shell motion-${preferences.motionMode} ${codexReady ? '' : 'auth-shell'}`}>
+    <div className={`app-shell motion-${preferences.motionMode} ${assistantReady ? '' : 'auth-shell'}`}>
       <div className="app-background app-background-one" />
       <div className="app-background app-background-two" />
 
-      {codexReady ? (
+      {assistantReady ? (
         <SidebarNav
           activeScreen={activeScreen}
           hints={navigationHints}
@@ -2715,17 +3822,22 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
           status={status}
           system={system}
           desktopRuntime={desktopRuntime}
-          codexReady={codexReady}
+          displayName={appSettings?.displayName ?? null}
+          onboardingStep={assistantReady ? undefined : onboardingStep}
+          assistantReady={assistantReady}
           busyLabel={busyLabel}
           error={error}
+          onSwitchProvider={(providerId) => {
+            void handleProviderChange(providerId);
+          }}
           onOpenSettings={() => {
             setSettingsOpen(true);
           }}
           onRefresh={() => {
             void initialize();
           }}
-          onLogout={() => {
-            void handleLogout();
+          onDisconnect={() => {
+            void handleDisconnect();
           }}
         />
         <main className="screen-frame">
@@ -2737,7 +3849,7 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
         </main>
       </div>
 
-      {codexReady ? (
+      {assistantReady ? (
         <MobileDock
           activeScreen={activeScreen}
           onSelect={(screenId) => {
@@ -2750,11 +3862,16 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
 
       <SettingsDrawer
         open={settingsOpen}
+        appSettings={effectiveAppSettings}
         preferences={preferences}
         codexSettings={codexSettings}
+        claudeSettings={claudeSettings}
         status={status}
         system={system}
         voiceSettings={voiceSettings}
+        onAppSettingChange={(key, value) => {
+          void handleAppSettingChange(key, value);
+        }}
         onPreferenceChange={handlePreferenceChange}
         onVoiceSettingChange={(key, value) => {
           void handleVoiceSettingChange(key, value);
@@ -2762,12 +3879,43 @@ const isDesktopShell = Boolean(window.desktopShell?.isDesktop);
         onCodexSettingChange={(key, value) => {
           void handleCodexSettingChange(key, value);
         }}
+        onClaudeSettingChange={(key, value) => {
+          void handleClaudeSettingChange(key, value);
+        }}
+        onProviderChange={(providerId) => {
+          void handleProviderChange(providerId);
+        }}
+        onProviderDisconnect={(providerId) => {
+          void handleProviderDisconnect(providerId);
+        }}
         onClose={() => {
           setSettingsOpen(false);
         }}
       />
 
       <ToastViewport toasts={toasts} onDismiss={dismissToast} />
+
+      <button
+        aria-label={`Switch to ${currentTheme === 'dark' ? 'light' : 'dark'} mode`}
+        className="floating-theme-toggle"
+        onClick={() => {
+          void handleAppSettingChange('theme', currentTheme === 'dark' ? 'light' : 'dark');
+        }}
+        type="button"
+      >
+        <span aria-hidden="true" className="theme-toggle-icon">
+          {currentTheme === 'dark' ? (
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+              <circle cx="12" cy="12" r="4.5" />
+              <path d="M12 2.5V5.25M12 18.75V21.5M21.5 12H18.75M5.25 12H2.5M18.72 5.28L16.78 7.22M7.22 16.78L5.28 18.72M18.72 18.72L16.78 16.78M7.22 7.22L5.28 5.28" />
+            </svg>
+          ) : (
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5 8.5 8.5 0 1 0 20.5 14.5Z" />
+            </svg>
+          )}
+        </span>
+      </button>
     </div>
   );
 }
@@ -2828,4 +3976,21 @@ function loadConsolePreferences(): ConsolePreferences {
   } catch {
     return defaultConsolePreferences;
   }
+}
+
+function loadStoredAppTheme(): AppSettings['theme'] | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  const rawValue = window.localStorage.getItem(appThemeStorageKey);
+  return rawValue === 'light' || rawValue === 'dark' ? rawValue : null;
+}
+
+function storeAppTheme(theme: AppSettings['theme']) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  window.localStorage.setItem(appThemeStorageKey, theme);
 }

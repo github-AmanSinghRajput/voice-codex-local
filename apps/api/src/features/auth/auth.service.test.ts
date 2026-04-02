@@ -41,12 +41,12 @@ test('AuthService syncs codex session once per unique snapshot', async () => {
     updatedAt: new Date().toISOString()
   });
 
-  await service.syncCodexCliSession({
+  await service.syncCliSession('codex', {
     loggedIn: true,
     authMode: 'ChatGPT'
   });
 
-  await service.syncCodexCliSession({
+  await service.syncCliSession('codex', {
     loggedIn: true,
     authMode: 'ChatGPT'
   });
@@ -60,7 +60,7 @@ test('AuthService clears codex session when logged out', async () => {
   const repository = new AuthRepositoryStub();
   const service = new AuthService(repository as never);
 
-  await service.syncCodexCliSession({
+  await service.syncCliSession('codex', {
     loggedIn: false,
     authMode: null
   });

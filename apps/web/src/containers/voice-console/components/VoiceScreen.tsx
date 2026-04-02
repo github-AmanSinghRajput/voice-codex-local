@@ -4,95 +4,160 @@ import type {
   AudioState,
   CodexSettingsResponse,
   VoiceCommandOption,
+  VoiceNarrationMode,
   VoiceSessionState,
   VoiceSettingsResponse,
   VoiceState
 } from '../lib/types';
 
 interface VoiceScreenProps {
+  activeProviderName: string;
   audio: AudioState | null;
+  busyLabel: string;
   codexSettings: CodexSettingsResponse | null;
+  showCodexSettings: boolean;
+  spokenReplyPreview?: string;
+  streamedTranscriptOverride?: string;
   voiceSettings: VoiceSettingsResponse | null;
   voiceSession: VoiceSessionState | null;
   voiceState: VoiceState;
+  voiceActivity: string | null;
+  recentVoiceActivities: string[];
+  narrationMode: VoiceNarrationMode;
   pendingCommandTitle: string | null;
   pendingCommandPrompt: string | null;
   pendingCommandOptions: VoiceCommandOption[];
   onApplyCommandOption: (option: VoiceCommandOption) => void;
   onDismissCommandOptions: () => void;
+  onToggleMute: () => void;
   onStart: () => void;
   onStop: () => void;
 }
 
 export function VoiceScreen({
   audio,
+  busyLabel,
   codexSettings,
-  voiceSettings,
+  showCodexSettings,
+  spokenReplyPreview,
+  streamedTranscriptOverride,
   voiceSession,
   voiceState,
+  voiceActivity,
+  recentVoiceActivities,
+  narrationMode,
   pendingCommandTitle,
   pendingCommandPrompt,
   pendingCommandOptions,
   onApplyCommandOption,
   onDismissCommandOptions,
+  onToggleMute,
   onStart,
   onStop
 }: VoiceScreenProps) {
   const isDesktopAudio = audio?.platform === 'darwin';
-  const phases = [
-    { id: 'listening', label: 'Listening' },
-    { id: 'thinking', label: 'Thinking' },
-    { id: 'speaking', label: 'Speaking' }
-  ] as const;
   const currentTranscriptLabel =
     voiceSession?.phase === 'thinking' || voiceSession?.phase === 'speaking'
-      ? 'Assistant draft'
-      : 'Live transcript';
-  const currentTranscript = voiceSession?.liveTranscript || 'Waiting for live speech...';
+      ? 'AI response'
+      : 'Your voice';
+  const currentTranscript =
+    (voiceSession?.phase === 'speaking' && spokenReplyPreview
+      ? spokenReplyPreview
+      : streamedTranscriptOverride || voiceSession?.liveTranscript) || 'Waiting for live speech...';
   const lastTranscript = voiceSession?.lastTranscript || 'No completed voice turn yet.';
+  const activeActivity = voiceActivity ?? recentVoiceActivities[0] ?? null;
+
+  function getStatusLabel() {
+    if (voiceActivity) return voiceActivity;
+    if (busyLabel) return busyLabel;
+    if (voiceSession?.phase === 'listening') return 'Listening...';
+    if (voiceSession?.phase === 'thinking') return 'Working on it...';
+    if (voiceSession?.phase === 'speaking') return 'Speaking...';
+    if (voiceSession?.phase === 'starting') return 'Starting up...';
+    if (voiceSession?.phase === 'error') return 'Something went wrong';
+    return 'Ready when you are';
+  }
 
   return (
     <section className="screen voice-screen">
       <div className="voice-layout">
         <section className="voice-stage-card">
-          <div className="voice-stage-copy">
-            <p className="section-kicker">Voice session</p>
-            <h2>{getVoiceHeadline(voiceState)}</h2>
-            <p>
-              {getVoiceSubline(
-                audio ?? fallbackAudioState,
-                voiceState,
-                voiceSession?.liveTranscript ?? '',
-                voiceSession?.error
-              )}
-            </p>
-            <div className="voice-phase-rail">
-              {phases.map((phase) => (
-                <div
-                  key={phase.id}
-                  className={`voice-phase-pill ${voiceSession?.phase === phase.id ? 'active' : ''}`}
-                >
-                  {phase.label}
-                </div>
-              ))}
+          <div className="voice-stage-intro">
+            <div className="voice-stage-copy voice-stage-copy-centered">
+              <p className="section-kicker">Voice session</p>
+              <h2>{getVoiceHeadline(voiceState)}</h2>
+              <p>
+                {getVoiceSubline(
+                  audio ?? fallbackAudioState,
+                  voiceState,
+                  streamedTranscriptOverride ?? voiceSession?.liveTranscript ?? '',
+                  voiceSession?.error
+                )}
+              </p>
             </div>
           </div>
 
           <div className="voice-stage-visual">
             <FaceOrb voiceState={voiceState} large />
-            <div className="voice-live-grid">
-              <div className={`voice-transcript-card phase-${voiceSession?.phase ?? 'idle'}`}>
-                <span className="metric-label">{currentTranscriptLabel}</span>
-                <p className="voice-transcript-line">{currentTranscript}</p>
-              </div>
-              <div className="voice-transcript-card voice-transcript-card-muted">
-                <span className="metric-label">Last completed turn</span>
-                <p className="voice-transcript-line">{lastTranscript}</p>
-              </div>
+            <div className={`voice-status-badge phase-${voiceSession?.phase ?? 'idle'}`}>
+              <span className="voice-status-dot" />
+              <span className="voice-status-text">{getStatusLabel()}</span>
             </div>
           </div>
 
-          <div className="action-row">
+          <div className="voice-live-grid">
+            <div className={`voice-transcript-card voice-transcript-card-primary phase-${voiceSession?.phase ?? 'idle'}`}>
+              <div className="voice-card-head">
+                <span className="metric-label">{currentTranscriptLabel}</span>
+                <span className={`section-chip ${voiceSession?.active ? 'approved' : ''}`}>
+                  {voiceSession?.active ? 'Live' : 'Standby'}
+                </span>
+              </div>
+              <p className="voice-transcript-line voice-transcript-clamped">{currentTranscript}</p>
+            </div>
+
+            {activeActivity ? (
+              <div className={`voice-transcript-card voice-activity-card phase-${voiceSession?.phase ?? 'idle'}`}>
+                <span className="metric-label">What it&apos;s doing</span>
+                <p className="voice-activity-current">{activeActivity}</p>
+                {recentVoiceActivities.length > 1 ? (
+                  <div className="voice-activity-log">
+                    {recentVoiceActivities.slice(1, 4).map((activity, index) => (
+                      <span className="voice-activity-item" key={`${activity}-${index}`}>
+                        {activity}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              <div className="voice-transcript-card voice-transcript-card-muted voice-transcript-card-hint">
+                <span className="metric-label">Session flow</span>
+                <p className="voice-transcript-line">
+                  Listen, think, speak. You can interrupt while the assistant is talking.
+                </p>
+              </div>
+            )}
+
+            <div className="voice-transcript-card voice-transcript-card-muted">
+              <span className="metric-label">Last message</span>
+              <p className="voice-transcript-line voice-transcript-clamped">{lastTranscript}</p>
+            </div>
+          </div>
+
+          {voiceSession?.error ? (
+            <div className="voice-error-banner">
+              <span className="metric-label">Voice issue</span>
+              <strong>{voiceSession.error}</strong>
+              <p>
+                {isDesktopAudio
+                  ? 'Check microphone permissions, local speech services, or the desktop runtime logs.'
+                  : 'Check browser microphone permissions and speech-recognition availability.'}
+              </p>
+            </div>
+          ) : null}
+
+          <div className="action-row voice-action-row">
             <button
               className="button-primary"
               disabled={Boolean(voiceSession?.active) || !audio?.available}
@@ -109,10 +174,16 @@ export function VoiceScreen({
             >
               End voice chat
             </button>
-            <span className="section-chip pending">
-              {audio?.speechEngine ?? 'Voice output unavailable'}
+            <button className="button-secondary" onClick={onToggleMute} type="button">
+              {narrationMode === 'muted' ? 'Unmute voice' : 'Mute voice'}
+            </button>
+            <span className={`section-chip ${narrationMode === 'muted' ? 'rejected' : 'approved'}`}>
+              {narrationMode === 'muted'
+                ? 'Voice muted'
+                : narrationMode === 'silent_progress'
+                  ? 'Voice replies on'
+                  : 'Narrated mode'}
             </span>
-            {voiceSession?.error ? <span className="section-chip rejected">{voiceSession.error}</span> : null}
           </div>
         </section>
 
@@ -146,58 +217,6 @@ export function VoiceScreen({
           </section>
         ) : null}
 
-        <section className="metrics-grid">
-          <article className="metric-card">
-            <span className="metric-label">Input</span>
-            <strong>{audio?.inputDeviceLabel ?? 'Waiting for active device'}</strong>
-            <p>
-              {isDesktopAudio
-                ? 'Uses the active macOS input device and follows hardware changes while the session is live.'
-                : 'Uses whatever the browser currently exposes as the active input device.'}
-            </p>
-          </article>
-          <article className="metric-card">
-            <span className="metric-label">Output</span>
-            <strong>{audio?.speechEngine ?? 'Unavailable'}</strong>
-            <p>
-              Kokoro-backed replies when available, with browser speech synthesis only as a fallback.
-            </p>
-          </article>
-          <article className="metric-card">
-            <span className="metric-label">Speech engines</span>
-            <strong>{audio?.transcriptionEngine ?? 'Unavailable'} / {audio?.speechEngine ?? 'Unavailable'}</strong>
-            <p>Runs speech recognition and voice synthesis locally on your machine when available.</p>
-          </article>
-          <article className="metric-card">
-            <span className="metric-label">Session policy</span>
-            <strong>
-              Voice replies enabled / {voiceSettings?.settings.autoResumeAfterReply ? 'Auto-resume on' : 'Manual resume'}
-            </strong>
-            <p>
-              Silence: {voiceSettings?.settings.silenceWindowMs ?? 800}ms. STT model: {voiceSettings?.settings.transcriptionModel === 'multilingual-small' ? 'multilingual small' : 'default'}.
-            </p>
-          </article>
-          <article className="metric-card">
-            <span className="metric-label">Codex model</span>
-            <strong>
-              {codexSettings?.settings.model ?? 'Using Codex default'} / {formatReasoningEffort(codexSettings?.settings.reasoningEffort)} reasoning
-            </strong>
-            <p>
-              Change the active model by voice or from Settings. Your global Codex CLI config stays untouched.
-            </p>
-          </article>
-          {voiceSession?.error ? (
-            <article className="metric-card metric-card-error">
-              <span className="metric-label">Last voice error</span>
-              <strong>{voiceSession.error}</strong>
-              <p>
-                {isDesktopAudio
-                  ? 'Check microphone access, the local Whisper setup, or fallback-provider logs in the desktop runtime.'
-                  : 'Check browser microphone permissions and speech recognition availability.'}
-              </p>
-            </article>
-          ) : null}
-        </section>
       </div>
     </section>
   );

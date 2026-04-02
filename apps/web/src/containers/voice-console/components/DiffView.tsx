@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { parseFileDiff } from '../lib/diff';
 import type { DiffHunk, DiffRow } from '../lib/types';
 
@@ -68,20 +68,15 @@ interface DiffHunkSectionProps {
 }
 
 function DiffHunkSection({ filePath, hunk, hunkIndex, previousHunk, mode }: DiffHunkSectionProps) {
-  const [gapExpanded, setGapExpanded] = useState(false);
   const gapSize = computeGap(previousHunk, hunk);
 
   return (
     <>
-      {gapSize > 0 && !gapExpanded ? (
-        <button
-          className="diff-collapsed-separator"
-          onClick={() => setGapExpanded(true)}
-          type="button"
-        >
-          <span className="diff-collapsed-icon">&#x25BC;</span>
-          <span>Show {gapSize} hidden lines</span>
-        </button>
+      {gapSize > 0 ? (
+        <div className="diff-collapsed-separator" role="note">
+          <span className="diff-collapsed-icon">&#x22EF;</span>
+          <span>{gapSize} unchanged lines omitted between hunks</span>
+        </div>
       ) : null}
       <div className="diff-hunk-header">
         <code>{hunk.header}</code>

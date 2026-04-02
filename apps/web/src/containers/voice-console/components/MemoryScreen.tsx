@@ -147,7 +147,7 @@ export function MemoryScreen({
           <article className="metric-card">
             <span className="metric-label">Operator auth</span>
             <strong>{system?.auth.operator?.displayName ?? 'No operator linked'}</strong>
-            <p>Local operator identity is tracked separately from the Codex CLI session.</p>
+            <p>Local operator identity is tracked separately from the connected assistant CLI sessions.</p>
           </article>
           <article className="metric-card">
             <span className="metric-label">Product auth plan</span>
@@ -173,7 +173,7 @@ export function MemoryScreen({
           {trackedSessions.length === 0 ? (
             <div className="empty-state compact">
               <p>No tracked sessions yet.</p>
-              <span>Codex CLI and future Google product sessions will appear here.</span>
+              <span>Connected CLI sessions and future product sessions will appear here.</span>
             </div>
           ) : (
             trackedSessions.map((session) => (

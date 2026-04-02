@@ -40,6 +40,7 @@ export interface DiffSummary {
   isGitRepo: boolean;
   changedFiles: string[];
   files: DiffFileBlock[];
+  redactedFiles?: string[];
 }
 
 export interface AudioState {

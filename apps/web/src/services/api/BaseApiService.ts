@@ -1,8 +1,22 @@
 export class BaseApiService {
-  constructor(protected readonly baseUrl: string) {}
+  constructor(
+    protected readonly baseUrl: string,
+    private readonly apiAuthToken: string | null = null
+  ) {}
+
+  protected createHeaders(headers?: HeadersInit) {
+    const nextHeaders = new Headers(headers);
+    if (this.apiAuthToken) {
+      nextHeaders.set('x-vocod-local-auth', this.apiAuthToken);
+    }
+    return nextHeaders;
+  }
 
   protected async request<T>(path: string, init?: RequestInit): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${path}`, init);
+    const response = await fetch(`${this.baseUrl}${path}`, {
+      ...init,
+      headers: this.createHeaders(init?.headers)
+    });
     const body = (await response.json()) as {
       error?: string;
       code?: string;
