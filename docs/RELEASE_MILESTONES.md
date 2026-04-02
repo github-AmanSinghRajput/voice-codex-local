@@ -1,215 +1,222 @@
-# Voice Codex Local Release Milestones
+# VOCOD Release Milestones
 
-This file is the working release roadmap for the product.
+This file is the active release roadmap for VOCOD.
 
-It is intentionally checkbox-driven so the team can track what is:
+It exists to answer one question clearly:
 
-- shipped
-- in progress
-- intentionally deferred
+`What is shipped, what is next, and what is intentionally later?`
 
-This should stay aligned with the actual product plan, not with wishlist scope.
+If a milestone or feature is not useful for deciding product direction or execution priority, it should not live here.
 
-## Product release model
+## Versioning stance
 
-The release sequence is:
+Current release posture:
 
-1. `v1.0`: Voice Codex macOS desktop launch
-2. `v1.1`: multi-coding-assistant login
-3. `v1.2`: production-grade AI note-taker for developer meetings
-4. `v2.0`: developer vibe / music recommendation layer
+- `0.1.0-beta.x` = invite-only beta
+- `0.2.x` = launch hardening and public-beta readiness
+- `1.0.0` = first serious public VOCOD release
 
----
+## Product phases
 
-## v1.0: Voice Codex Launch
+The current product sequence is:
 
-Goal:
-Ship a public-facing macOS voice-first coding product that feels trustworthy, sharp, and usable daily.
-
-Primary launch surfaces:
-
-- product website for download and product messaging
-- macOS desktop app distributed as `.dmg`
-
-Non-primary surfaces:
-
-- local browser-based development shell only
-
-### Core product
-
-- [ ] polished onboarding / connect flow
-- [ ] local Codex login flow clearly guided in UI
-- [ ] continuous voice conversation loop
-- [ ] clear text fallback input
-- [ ] stable conversation transcript/log view
-- [ ] project boundary selection
-- [ ] read-only by default
-- [ ] approval-gated file changes
-- [ ] revoke write access control
-- [ ] logout Codex control
-
-### Voice
-
-- [ ] robust live voice session UX
-- [ ] clear listening / thinking / speaking states
-- [ ] browser Web Speech API transcription loop
-- [ ] active-input device label in UI
-- [ ] device hot-plug / unplug detection
-- [ ] auto-restart speech recognition on device switch
-- [ ] no-microphone detected fallback state
-- [ ] backend TTS provider abstraction
-- [ ] Kokoro-82M integration
-- [ ] audio playback of generated assistant speech in the desktop runtime
-- [ ] Piper or browser `speechSynthesis` fallback
-- [ ] device-aware audio status
-- [ ] manual device selection if platform/device constraints require it later
-
-### Trust and review
-
-- [ ] clear approval request presentation
-- [ ] premium diff review surface
-- [ ] changed-file switching in diff review
-- [ ] approval history view
-- [ ] clear workspace trust messaging
-
-### Frontend quality
-
-- [ ] production-grade desktop shell
-- [ ] premium top bar / spacing / hierarchy polish
-- [ ] terminal-style conversation surface refinement
-- [ ] settings surface polish
-- [ ] responsive mobile layout polish
-- [ ] skeleton loading states
-- [x] toast notifications
-- [x] lazy loading for heavy screens
-- [ ] reduced-motion support fully verified
-
-### Backend quality
-
-- [x] Postgres setup
-- [x] DB-backed chat persistence
-- [x] DB-backed approval history
-- [x] DB-backed notes foundation
-- [x] env validation
-- [x] centralized error handling
-- [x] request IDs
-- [x] rate limiting baseline
-- [x] structured logging baseline
-- [ ] stronger voice/device settings persistence
-- [ ] more backend tests around voice/settings flows
-- [ ] packaging/deployment hardening for launch
-
-### Launch readiness
-
-- [ ] launch copy and messaging
-- [ ] website/landing page
-- [ ] download/install documentation for public users
-- [ ] Electron app-shell setup
-- [ ] macOS packaging plan
-- [ ] `.dmg` build path
-- [ ] macOS signing and notarization plan
-- [ ] basic analytics/error-reporting plan
-- [ ] Railway deployment plan
-
-### Explicitly out of scope for v1.0
-
-- [ ] Google product auth
-- [ ] Claude Code login
-- [ ] meeting note-taker workflows
-- [ ] meeting participation agent
-- [ ] music recommendation system
-
-These are deferred on purpose and should not block launch.
+1. `0.1 beta`: reliable invite-only desktop beta
+2. `0.2`: public-beta readiness and packaging/distribution hardening
+3. `1.0`: trustworthy voice-first coding desktop launch
+4. `1.1`: note-taker foundation and meeting memory
+5. `1.2`: Granola-level developer meeting note-taker
+6. `2.0`: vibe music and immersive coding ambience
 
 ---
 
-## v1.1: Multi-Coding-Assistant Login
+## 0.1 Beta: Invite-Only Desktop Beta
 
 Goal:
-Expand the operator shell beyond Codex so users can connect different coding assistants in one product.
+Ship a testable macOS desktop beta that feels coherent, safe enough to demo, and strong enough to put in front of real users on an invite basis.
 
-### Scope
+### Product identity
 
-- [ ] Codex login remains supported
-- [ ] Claude Code login support
-- [ ] assistant provider abstraction in backend
-- [ ] assistant/provider selector in UI
-- [ ] provider-specific capability handling
-- [ ] provider session management
-- [ ] provider-specific trust/review handling if needed
-- [ ] UX copy updated from "Codex only" to "coding assistant"
+- [x] product renamed to `VOCOD`
+- [x] desktop-first product direction
+- [x] dynamic provider-aware UI instead of Codex-only language
+- [ ] README and repo-level naming fully cleaned up everywhere
+
+### Core assistant flow
+
+- [x] project/workspace selection
+- [x] read-only by default
+- [x] approval-gated write flow
+- [x] review screen for proposed code changes
+- [x] text chat fallback
+- [x] voice conversation loop
+- [x] multi-provider support for Codex and Claude Code
+- [x] app-managed provider connection state
+- [x] provider switching between connected providers
+- [ ] end-to-end provider reliability fully validated on real machines
+
+### Voice quality
+
+- [x] local TTS path
+- [x] local STT path
+- [x] Moonshine STT integration
+- [x] Whisper fallback path
+- [x] Kokoro voice selection
+- [x] speaking/listening UI states
+- [x] streamed text visibility while the assistant responds
+- [ ] final tuning for natural TTS pacing and chunk flow
+- [ ] final tuning for barge-in sensitivity and noisy-room robustness
+- [ ] real-device validation across multiple microphones and rooms
+
+### UI and UX
+
+- [x] step-based onboarding
+- [x] app-level display name
+- [x] light and dark mode
+- [x] provider-aware onboarding
+- [x] PR-style review flow
+- [x] voice screen redesign
+- [x] chat screen with message-only scrolling
+- [ ] final full-app visual QA in light theme
+- [ ] final pass on spacing, copy, and consistency across every screen
+
+### Security baseline
+
+- [x] local API bound to localhost
+- [x] per-install local API auth token
+- [x] workspace root validation tightened
+- [x] secret-path enforcement in code
+- [x] sensitive diff/status filtering
+- [x] stricter desktop IPC/runtime boundary
+- [x] CSP baseline
+- [ ] dedicated security review after beta stabilization
+
+### Distribution baseline
+
+- [ ] DMG packaging path
+- [ ] first-launch dependency/model setup experience
+- [ ] install/update instructions
+- [ ] invite-only beta website/download flow
+- [ ] beta release checklist
+
+---
+
+## 0.2: Public-Beta Readiness
+
+Goal:
+Turn the private beta into something that can be downloaded and tested by broader external users without hand-holding.
+
+### Required scope
+
+- [ ] stable DMG generation
+- [ ] signing/notarization plan
+- [ ] simple install flow for local runtimes/models
+- [ ] first-run health checks inside the app
+- [ ] better failure recovery when local models/providers are missing
+- [ ] provider/account/session messaging polished for real users
+- [ ] version display and update strategy
+- [ ] public-facing website for product messaging and download
 
 ### Non-goals
 
-- [ ] full multi-agent orchestration platform
-- [ ] enterprise account/team management
+- [ ] enterprise admin
+- [ ] team collaboration
+- [ ] cloud-hosted code execution
 
 ---
 
-## v1.2: AI Note-Taker for Developer Meetings
+## 1.0: VOCOD Public Launch
 
 Goal:
-Ship a production-grade AI note-taker designed specifically for developer meetings.
+Launch VOCOD as a trustworthy voice-first coding desktop app for real developer workflows.
 
-This is a major feature track, not a small extension of the v1.0 memory panel.
+### Launch bar
 
-### Notes foundation already present
+- [ ] voice experience feels fast, clear, and dependable
+- [ ] text chat feels polished and production-grade
+- [ ] review flow is trustworthy enough for daily use
+- [ ] onboarding is fast and understandable for first-time users
+- [ ] Claude and Codex both feel first-class
+- [ ] desktop app install experience is clean
+- [ ] public website explains the product and sets expectations
+- [ ] core security posture is credible for external users
 
-- [x] basic note storage
-- [x] note create/edit/delete
-- [x] memory screen foundation
+### Product bar
 
-### Required meeting-note-taker scope
-
-- [ ] real meeting recording flow
-- [ ] transcript capture pipeline
-- [ ] AI-generated meeting summaries
-- [ ] action item extraction
-- [ ] decisions extraction
-- [ ] code/task context extraction
-- [ ] searchable note history
-- [ ] note detail / session detail view
-- [ ] better note organization and filtering
-- [ ] speaker-aware meeting UX if supported
-- [ ] import/export/share workflow
-
-### Advanced vision for this release
-
-- [ ] ask questions about past notes via voice
-- [ ] interact with meeting memory conversationally
-- [ ] meeting companion mode for developers
-- [ ] exploratory "join meeting and answer when asked" scope definition
-
-This last point is intentionally not committed as shipped scope yet. It needs separate product definition before implementation.
+- [ ] users can reliably talk, review, and approve work in one loop
+- [ ] users can choose their provider and model confidently
+- [ ] voice mode feels native rather than gimmicky
+- [ ] the product is demo-worthy and founder-pitch-worthy
 
 ---
 
-## v2.0: Developer Vibe Layer
+## 1.1: Note-Taker Foundation
 
 Goal:
-Make the product more immersive and enjoyable during long coding sessions.
+Expand VOCOD from voice coding into durable developer memory and session capture.
 
 ### Scope
 
-- [ ] music recommendation system
-- [ ] coding-mode personalization
-- [ ] session-aware ambiance recommendations
-- [ ] taste/profile settings
-- [ ] optional integrations depending on licensing/product direction
+- [ ] strong notes data model
+- [ ] searchable note history
+- [ ] note timeline/session timeline
+- [ ] transcript-linked notes
+- [ ] note summaries and extracted actions
+- [ ] settings and UX for note capture preferences
+
+### Why this matters
+
+This starts moving VOCOD from "voice coding app" toward "voice-native developer workspace."
+
+---
+
+## 1.2: Granola-Level Developer Note-Taker
+
+Goal:
+Ship a note-taking experience that feels competitive with best-in-class meeting-note products, but built for developers.
+
+### Product ambition
+
+- [ ] meeting capture flow
+- [ ] high-quality transcripts
+- [ ] decisions extraction
+- [ ] action items extraction
+- [ ] engineering-context summaries
+- [ ] code/task references tied to discussion
+- [ ] searchable memory across sessions
+- [ ] beautiful detail views for sessions and notes
+- [ ] conversational recall of past meetings and decisions
 
 ### Important constraint
 
-This should only be built after the core product is already trusted and useful.
+This is a major product line, not a sidebar feature.
+It should be treated with the same seriousness as the core voice-coding experience.
 
-It is a product amplifier, not the product foundation.
+---
+
+## 2.0: Vibe Music
+
+Goal:
+Add an immersive, high-quality vibe/music layer that amplifies focus and makes VOCOD feel more like an intelligent coding environment.
+
+### Scope direction
+
+- [ ] music and ambience system
+- [ ] coding-session-aware recommendations
+- [ ] focus modes / mood modes
+- [ ] personalized taste/profile controls
+- [ ] optional adaptive music based on session state
+
+### Constraint
+
+This should only be pushed hard after the core coding and note-taking product is already trusted.
 
 ---
 
 ## Ongoing rules
 
-- [ ] keep `v1.0` launch quality as the priority until public release
-- [ ] do not let future note-taker scope derail the voice coding launch
-- [ ] do not let novelty features block trust, review, and usability work
-- [ ] keep the public product desktop-first
-- [ ] update this file whenever scope changes materially
-- [ ] use this file as the milestone source of truth during implementation
+- [ ] keep the beta and launch experience grounded in trust and reliability
+- [ ] do not let future note-taker scope derail core voice-coding quality
+- [ ] do not let vibe/music novelty outrun product fundamentals
+- [ ] keep VOCOD desktop-first
+- [ ] keep local execution and explicit user control as product pillars
+- [ ] update this file when scope changes materially

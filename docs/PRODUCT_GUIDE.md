@@ -1,593 +1,311 @@
-# Voice Codex Local Product Guide
+# VOCOD Product Guide
 
-## 1. Purpose of This Document
+## 1. Purpose
 
-This document is the main product reference for Voice Codex Local.
+This is the main product reference for VOCOD.
 
-It is written to help:
+It should help:
 
-- AI agents understand the product clearly
-- human collaborators onboard quickly
-- designers understand the product scope
-- engineers understand current architecture and future direction
-- product-minded reviewers give better feedback
-- future team members understand what this should become
+- engineers understand what the product is now
+- AI agents understand what to optimize for
+- designers understand the intended product feel
+- future collaborators understand what is core versus future scope
 
-If someone needs one document to understand the product, this should be the first file they read.
+If someone reads one document to understand VOCOD, this should be that document.
 
-## 2. Product Overview
+## 2. What VOCOD Is
 
-Voice Codex Local is a desktop-first voice-first AI coding assistant built around Codex.
+VOCOD is a desktop-first, voice-first AI coding workspace.
 
-It is designed to let a developer talk to an AI coding operator naturally, keep a visible text log of the conversation, constrain the assistant to an explicitly selected project root, and require approval before any file changes are applied.
+It lets a developer:
 
-The product is not meant to be a generic chatbot or a browser-only coding website.
+- talk to an AI coding assistant naturally
+- see the conversation as live text
+- work inside a selected project boundary
+- keep writes approval-gated
+- review diffs before code changes land
+- switch between supported coding providers such as Codex and Claude Code
 
-It is a high-trust coding operator.
+VOCOD is not meant to be a generic chatbot and not meant to be a browser-only coding toy.
 
-The central experience is:
+The product direction is:
 
-- talk to Codex naturally
-- see every spoken interaction reflected as text
-- work inside a chosen project boundary
-- keep file changes approval-gated
-- review diffs clearly
-- eventually manage notes, memory, tasks, and specialist sub-agents in the same system
-
-The product website is meant to distribute the macOS app, not replace it.
+`a trustworthy voice-native coding workspace for developers`
 
 ## 3. Product Vision
 
-The long-term vision is to create a macOS voice-native software engineering workstation.
+The long-term vision is bigger than voice chat for code.
 
-Instead of forcing a developer to jump between:
+VOCOD should become a voice-native developer workspace that combines:
 
-- a terminal
-- an IDE
-- a browser
-- an AI chat
-- notes
-- task lists
-
-the product should bring those workflows together into one operator surface.
+- coding assistance
+- voice interaction
+- text chat
+- review and approval
+- memory and note-taking
+- later, ambient vibe/music tooling
 
 The finished product should feel like:
 
-- an AI coding cockpit
+- a serious AI coding cockpit
 - a trusted spoken engineering partner
-- a serious local-first developer tool
-- a system worthy of daily use
-- a product impressive enough to demo publicly
+- a premium desktop tool
+- something strong enough to demo publicly and useful enough to keep using after the demo
 
-This should become more than "voice chat for code."
+## 4. Core Product Thesis
 
-The stronger ambition is:
+The product thesis is:
 
-`a trusted voice-native AI coding operator`
+Developers will adopt voice-native AI workflows if the product is:
 
-## 4. The Problem We Are Solving
-
-Current AI coding workflows have several problems:
-
-1. Most AI coding tools are still primarily text-box based.
-2. Voice experiences are usually shallow, gimmicky, or unreliable.
-3. Developers do not trust uncontrolled autonomous edits.
-4. AI output is often disconnected from the actual repo and actual execution flow.
-5. Existing tools often feel like demos instead of serious software products.
-
-There is a gap between:
-
-- "AI can answer coding questions"
-
-and
-
-- "AI can safely operate as a real engineering companion inside my workflow"
-
-Voice Codex Local is meant to close that gap.
-
-## 5. Product Thesis
-
-The core product thesis is:
-
-Developers will adopt voice-native AI coding workflows if the system is:
-
-- useful on real projects
-- bounded and trustworthy
-- visually clear
+- actually useful on real projects
+- bounded by real project/workspace controls
+- explicit about when code is being changed
 - fast enough to stay in flow
-- interruptible
-- auditable
-- better than a novelty layer on top of chat
+- auditable after the fact
+- visually clear and product-quality
 
-Voice becomes compelling only when it is paired with trust and execution discipline.
+Voice alone is not enough.
+Voice only becomes valuable when it is paired with trust, clarity, and real execution discipline.
 
-That trust layer is part of the product, not just an engineering concern.
+## 5. Primary Use Cases
 
-## 6. Core Product Positioning
+### Voice coding
 
-The best current positioning is:
+The user talks through a bug, idea, change, or task and gets coding help back naturally.
 
-`Voice Codex Local is a trusted macOS voice-native coding operator for developers who want to talk to an AI engineering partner without giving up control of their codebase.`
+### Text fallback
 
-This is stronger than:
+The user can continue in text when voice is inconvenient or when they want a more deliberate chat workflow.
 
-- "voice AI for coding"
-- "talk to Codex"
-- "AI coding assistant with voice"
+### Approval-gated edits
 
-because it emphasizes both:
+The assistant can propose code changes, but meaningful writes should stay behind review and approval.
 
-- natural interaction
-- controlled execution
+### Diff review
 
-## 7. What Makes This Product Different
+The user should be able to inspect AI-generated changes in a review experience that feels closer to reviewing a PR than glancing at a raw patch.
 
-The differentiator is not just voice.
+### Future developer memory
 
-The product becomes distinctive when it combines:
+VOCOD should evolve into a place where important decisions, notes, tasks, and meeting context become durable and searchable.
 
-1. voice-native interaction
-2. local-machine execution flow
-3. explicit project scope
+## 6. What Makes VOCOD Different
+
+The differentiation is not just "voice."
+
+VOCOD becomes distinctive when it combines:
+
+1. voice-first interaction
+2. real local execution against the user's machine and repo
+3. project/workspace boundaries
 4. approval before mutation
-5. visible text logs
-6. diff-based review
-7. future notes, memory, and multi-agent delegation
+5. visible text transcripts
+6. a real review flow
+7. provider flexibility
+8. future memory/note-taking depth
 
-That combination is meaningful.
+Most competing experiences only deliver part of that stack.
 
-Most tools have only part of this:
+## 7. Product Principles
 
-- chat but no execution control
-- voice but no real coding workflow
-- agents but weak trust boundaries
-- coding help but no product-quality operator surface
+### Voice is primary, text is mandatory
 
-Voice Codex Local can become a category-level product if it holds this combination tightly.
+Voice drives the experience, but text logs should always exist.
 
-## 8. Ideal Users
+### Trust is part of the product
 
-### Primary users
+Project boundaries, read-only defaults, approval gates, and secret handling are product features, not implementation details.
 
-- solo developers
-- startup founders who code
-- indie hackers
-- AI-native builders
-- senior engineers who want faster iteration
+### The app should feel like an operator console
 
-### Secondary users
+VOCOD should feel intentional, premium, technical, and focused.
+It should not feel like a generic SaaS dashboard or a thin wrapper around a chat box.
 
-- engineering managers who still build
-- technical creators and demo-driven builders
-- developer advocates
-- teams exploring AI-assisted workflows
+### Local control matters
 
-### Strong early adopter profile
+The coding runtime should feel like it belongs to the user and runs under their control.
 
-The strongest early user is likely:
+### Demo quality matters
 
-`a technically capable builder who wants a serious AI coding workflow, wants voice to be useful, and does not want to surrender control of the codebase`
+The product should be understandable quickly, visually coherent, and impressive in live use.
 
-## 9. Main User Jobs
+### Future scope should not sabotage launch quality
 
-The product should help users do these jobs well.
+Notes and vibe/music are important, but they should not degrade the core coding loop.
 
-### Job 1: Think out loud while building
+## 8. Current Product Shape
 
-The user wants to speak ideas, bugs, architecture thoughts, and implementation directions without constantly typing.
+VOCOD today is a desktop-oriented app with a local runtime and a voice/text UI.
 
-### Job 2: Ask for coding help in project context
+### Current working capabilities
 
-The user wants the assistant to respond with awareness of the selected workspace, not generic advice only.
+- multi-step onboarding
+- app-level display name
+- app-managed provider connections
+- support for Codex and Claude Code
+- provider switching between app-connected providers
+- voice and text conversation modes
+- read-only by default
+- approval-gated write flow
+- review screen for AI proposed changes
+- chat persistence
+- settings for voice/theme/provider behavior
+- local STT/TTS path
+- Moonshine STT with Whisper fallback direction
+- Kokoro voice output path
+- light and dark theme support
 
-### Job 3: Delegate execution safely
+### Current product limitations
 
-The user wants Codex to propose real code changes, but only apply them when explicitly approved.
+- the shipping DMG path still needs hardening
+- voice quality still needs final real-device tuning
+- local dependency/model setup needs a polished first-run experience
+- full end-to-end validation still matters more than adding more surface area
+- some repo-level docs and naming still lag behind the current VOCOD brand
 
-### Job 4: Review changes clearly
+## 9. Product Architecture Direction
 
-The user wants file changes to be legible, beautiful, and trustworthy.
+VOCOD naturally splits into two product layers.
 
-### Job 5: Keep a record
+### Local runtime
 
-The user wants every spoken exchange reflected into text logs.
+Runs on the user's machine and owns:
 
-### Job 6: Build memory over time
+- local UI shell
+- local assistant/provider execution
+- local repo/file access
+- voice capture and playback
+- local review/approval loop
 
-The user wants important decisions, action items, and notes captured in a reusable way.
+This layer must remain local because it touches local code and local tooling.
 
-## 10. Product Principles
+### Future cloud layer
 
-These principles should guide design and engineering decisions.
+Should later own:
 
-### Principle 1: Voice is primary, text is mandatory
+- invite-only access and user accounts
+- website and download flow
+- sync-worthy product data
+- future analytics and product operations
+- later multi-device or team features
 
-Voice drives interaction, but text logs must always exist.
+The coding runtime itself should not become cloud-hosted.
 
-### Principle 2: Local control matters
+## 10. Assistant Provider Direction
 
-The product should feel like it belongs to the user and runs with the user's explicit control.
+VOCOD is no longer a Codex-only product.
 
-### Principle 3: Approval before mutation
+The current product direction is provider-aware:
 
-Any meaningful file modification must be gated by explicit approval.
+- OpenAI Codex
+- Anthropic Claude Code
 
-### Principle 4: The UI should feel like an operator console
+Important rule:
 
-The interface should feel intentional, technical, premium, and distinct from generic SaaS dashboards or chatbot clones.
+VOCOD should manage app-level connections and preferences, but it should not own or copy provider credentials.
 
-### Principle 5: Product boundaries should be real
+## 11. Voice Product Direction
 
-Project scoping, secrets handling, and write controls are part of the product promise.
+The voice experience should feel:
 
-### Principle 6: Demo quality matters
+- natural
+- fast
+- interruptible
+- visible
+- trustworthy
 
-This product should be understandable quickly, impressive visually, and credible technically.
+That means VOCOD should keep improving:
 
-## 11. Current Product Scope
+- STT accuracy
+- TTS naturalness
+- noisy-room robustness
+- speaking/listening transitions
+- visible live text while the assistant responds
 
-The current build already supports a real working loop.
+The benchmark is not "it technically works."
+The benchmark is "it feels native enough that a developer wants to keep using it."
 
-### Current capabilities
+## 12. Distribution Direction
 
-- local frontend and backend monorepo
-- local Codex CLI login instead of API keys
-- manual project root selection
-- read-only mode by default
-- revocable write mode
-- approval gate before file-changing work
-- persistent text logs
-- diff capture and review after approved changes
-- continuous voice session support
-- browser-shell voice input during development
-- pluggable local TTS direction for desktop packaging
-- text fallback for non-voice interaction
+The intended public distribution model is:
 
-### Current limitations
+- website explains the product
+- users download the macOS app
+- the app runs a local runtime for coding work
+- future cloud services support product/distribution concerns, not local code execution
 
-- the public desktop packaging path is not finished yet
-- transcription and playback still need final desktop-grade validation
-- output speech needs final Kokoro packaging/runtime polish
-- secrets protection is still policy-driven rather than fully hardened
-- note-taking exists only as product direction, not yet as a finished feature
-- multi-agent orchestration is planned, not implemented
-- frontend visual quality is improving but not yet final public-launch quality
+The browser dev shell is useful for development, but it is not the intended public product.
 
-## 12. Distribution Model
+## 13. Beta and Launch Stance
 
-The product distribution model is now:
+Current release posture should be treated as:
 
-1. a marketing/product website explains the product
-2. users download the macOS app from that website
-3. the real coding runtime, local file access, and local TTS model run on the user's Mac
-4. Railway hosts product/backend concerns such as accounts, metadata, and future sync
+`invite-only beta`
 
-This distinction matters because a plain hosted web app cannot safely or fully deliver the local coding-agent promise on its own.
+That means the real priorities are:
 
-## 13. Current User Flow
+- reliability
+- trust
+- visual coherence
+- voice quality
+- end-to-end testing
 
-The current user flow is:
+Not every future idea needs to ship before the beta is valuable.
 
-1. User opens the app
-2. App checks local Codex login status
-3. User manually sets a project root
-4. User keeps the assistant in read-only mode or enables write-proposal mode
-5. User starts a voice session or types a prompt
-6. Speech is transcribed and sent to Codex
-7. Codex returns either a direct reply or a write proposal
-8. Replies are logged and optionally spoken back through the desktop voice stack
-9. Write proposals are paused for approval
-10. Approved changes are executed and surfaced in a diff review UI
+## 14. Near-Term Roadmap
 
-That is already a real product loop and not just a concept.
+### Beta / launch-critical
 
-## 14. Current Technical Architecture
+- harden DMG/distribution path
+- finish real-device voice tuning
+- tighten onboarding and first-run setup
+- keep review and provider flows reliable
+- make the app feel polished in both dark and light themes
 
-### Backend stack
+### Next major product track
 
-Chosen backend stack:
+Build developer memory and notes in a serious way, not as a throwaway sidebar.
 
-`TypeScript + Node.js`
+## 15. Future Major Features
 
-### Why this backend makes the most sense
+### Granola-level note-taker
 
-1. The product depends heavily on local process orchestration.
-2. It needs clean integration with:
-   - Codex CLI
-   - local files
-   - git
-   - local speech runtimes such as `whisper.cpp` and Kokoro
-3. TypeScript keeps the codebase understandable and maintainable for more developers.
-4. The stack is pragmatic for Railway deployment later.
-5. It gives us a good balance of speed and safety without overcomplicating iteration.
+This is one of the biggest future expansions for VOCOD.
 
-### Why not Bun, Python, Kotlin, or Rust right now
+The ambition is not just "save notes."
+It is a serious developer-focused meeting and thinking companion with:
 
-- Bun is promising but not necessary for this stage.
-- Python is better reserved for isolated ML-heavy subsystems if we need them later.
-- Kotlin is strong but adds unnecessary stack weight for this product right now.
-- Rust is powerful but slows product iteration at this stage.
-
-### Current backend shape
-
-The backend is moving toward:
-
-- thin app/bootstrap layer
-- config layer
-- feature services
-- runtime/session state
-- local desktop runtime integration
-- pluggable TTS provider path
-- Railway-friendly product/backend boundaries
-
-### Frontend direction
-
-The frontend is being rebuilt toward:
-
-- feature-first structure
-- smaller containers and presentational components
-- better DRY boundaries
-- reusable types/utilities
-- a UI strongly informed by the Stitch design direction
-- a desktop app shell packaged through Electron
-
-### Desktop architecture decision
-
-The chosen app-shell direction is:
-
-`Electron for v1.0`
-
-This is the right tradeoff because the product needs:
-
-1. mature macOS desktop packaging
-2. strong local process orchestration
-3. reliable coordination with a local runtime
-4. clean integration with Codex CLI, local files, and local TTS
-
-The product website is therefore a distribution layer, not the main runtime.
-
-## 15. Trust and Security Model
-
-Trust is central to the product.
-
-### Current trust model
-
-- no automatic project scanning
-- manual project root selection
-- read-only mode by default
-- revocable write access
-- approval required before file changes
-- visible diff review after changes
-- explicit text logs for actions and conversation
-- local Codex session required
-
-### Current limitations
-
-- secrets blocking is still policy-based
-- harder path-level isolation is still needed
-- execution isolation for risky repos is not implemented yet
-- approval history needs to become more robust
-
-### Security direction
-
-The product should move toward:
-
-- stronger secret-path enforcement
-- excluded path configuration
-- isolated worktree or temp-workspace execution options
-- clearer audit trail for approvals and actions
-
-## 16. Design Direction
-
-The visual direction should be:
-
-- dark
-- premium
-- technical
-- sharp
-- cinematic but disciplined
-- operator-console inspired
-
-It should not look like:
-
-- a generic chatbot
-- a flat SaaS admin dashboard
-- an overdone sci-fi gimmick
-
-The design should support these major surfaces:
-
-1. onboarding / connection
-2. workspace setup
-3. live voice session
-4. terminal / conversation
-5. diff review
-6. notes / memory
-7. macOS desktop settings/runtime surfaces
-
-### Current design reference
-
-The current strongest visual direction comes from the Stitch exports under:
-
-- `stitch_mobile_voice_console/`
-
-Those exports are references, not finished product code.
-
-## 17. Planned Product Expansion
-
-The product is expected to expand in these directions.
-
-### Better voice stack
-
-- stronger transcription
-- more human-sounding TTS
-- interruption handling
-- lower-latency response flow
-
-### In-app Codex connection support
-
-The product should let users enter or follow Codex connection commands directly in the UI rather than relying only on external terminal guidance.
-
-### Notes and memory
-
-The product should include an inbuilt note-taker inspired by Granola.
-
-That means capturing:
-
-- meeting notes
-- engineering decisions
+- strong transcripts
+- summaries
+- decisions
 - action items
-- code-related summaries
-- next steps
+- memory and recall
+- conversation over past sessions
 
-### Authentication for notes
+### Vibe music
 
-Google auth is planned for the note-taking layer so users can persist and organize their notes more formally.
+This is another major future track.
 
-### Database
+The goal is not gimmicky background noise.
+It is a high-quality focus and ambience layer that makes VOCOD feel more immersive during long coding sessions.
 
-Postgres should be introduced as the durable backend data layer for:
+This should come after the core product is trusted.
 
-- notes
-- sessions
-- users
-- future approvals history
-- future agent tasks
+## 16. What Should Stay Out of Scope for Now
 
-### Deployment
+Until beta and launch quality are strong, VOCOD should resist:
 
-The product is currently local-first, but the medium-term plan is to make it deployable, with Railway as an expected target when the development baseline is ready.
+- random feature sprawl
+- cloud-hosted code execution
+- weakly designed novelty add-ons
+- adding more providers without making current ones reliable
+- shipping future-facing surfaces that dilute the core coding workflow
 
-### Multi-agent system
+## 17. Summary
 
-The product is expected to expand into specialist sub-agents such as:
+VOCOD is becoming:
 
-- project manager
-- frontend engineer
-- backend engineer
-- test engineer
-- SRE / release engineer
+`a trustworthy voice-first coding workspace with real local execution, approval-gated changes, provider flexibility, and a long-term path into developer memory and immersive tooling.`
 
-## 18. Why This Product Could Become Sellable
-
-This product becomes sellable if it stops feeling like an internal experiment and starts feeling like a new category of developer tool.
-
-The strongest commercial strengths are:
-
-1. it solves a real workflow problem
-2. it has a visually distinctive product story
-3. it combines utility and novelty in a credible way
-4. it can become habit-forming if the flow is smooth
-5. it has a strong trust narrative compared with looser autonomous agents
-
-### Possible commercial angles
-
-- premium solo-developer AI workstation
-- trusted voice-native coding operator
-- local-first AI engineering console
-
-## 19. Why This Product Could Get Attention Publicly
-
-This product has public attention potential because it can create short demo moments that are easy to understand.
-
-Examples:
-
-- speaking to Codex and seeing code tasks flow naturally
-- approving changes with visible diffs
-- switching from live voice session to terminal transcript to memory notes
-- using the same system from desktop and mobile
-
-For the product to be publicly compelling, it must be:
-
-- understandable in seconds
-- visually memorable
-- technically believable
-
-## 20. Risks
-
-### Risk 1: Voice quality disappoints
-
-If speech input/output does not feel clearly better than cheap browser tooling, the product loses credibility.
-
-### Risk 2: Security promise is weak
-
-If users think the product can touch sensitive files unexpectedly, trust collapses.
-
-### Risk 3: The UI still looks like a prototype
-
-A strong concept can still fail if the product looks unfinished.
-
-### Risk 4: Positioning becomes muddy
-
-If the product tries to be too many things too early, it will lose its strongest identity.
-
-### Risk 5: Performance breaks the illusion
-
-Voice products are judged harshly on lag, awkward timing, and robotic behavior.
-
-## 21. Immediate Priorities
-
-The strongest next priorities are:
-
-1. finish backend cleanup for maintainability
-2. fully rebuild the frontend from the design direction
-3. improve speech output quality
-4. improve transcription quality
-5. add Postgres-backed foundations for note-taking and future auth
-6. support Codex connection flows more elegantly in-app
-
-## 21. Guidance for AI Agents or New Team Members
-
-If an AI agent or new human contributor is using this document, they should understand:
-
-1. this is a serious product, not a toy demo
-2. trust and approval flow are core requirements
-3. voice is primary, but logs and clarity are mandatory
-4. design quality matters as much as raw functionality
-5. the product should stay coherent as it expands
-
-When proposing improvements, they should optimize for:
-
-- usefulness on real coding tasks
-- stronger trust boundaries
-- better voice quality
-- maintainable architecture
-- premium product presentation
-
-They should avoid pushing the product toward:
-
-- generic chatbot UX
-- uncontrolled autonomy
-- noisy decorative security theater
-- bloated feature scope without clear product value
-
-## 22. Website and Launch Narrative Direction
-
-When the product is ready for a public-facing website, the narrative should likely be:
-
-### Hero
-
-Talk to your coding agent. Stay in control of your codebase.
-
-### Problem
-
-AI coding workflows are fragmented, text-heavy, and hard to trust.
-
-### Solution
-
-Voice Codex Local gives developers a voice-native coding operator with workspace control, approval-gated file changes, and visible diffs.
-
-### Trust
-
-Manual project scope, read-only default, explicit approval before writes.
-
-### Future
-
-Notes, memory, multi-agent delegation, and deeper developer workflow support.
-
-## 23. One-Paragraph Pitch
-
-Voice Codex Local is a voice-first AI coding operator that runs with local control, lets developers talk naturally to Codex, keeps every interaction visible in text, constrains the assistant to an explicitly selected workspace, and requires approval before code changes are applied. It is designed to become a trusted spoken software engineering workstation, not just another AI chat window.
-
-## 24. One-Sentence Positioning
-
-Voice Codex Local is a trusted voice-native coding operator for developers who want to talk to an AI engineering partner without giving up control of their codebase.
+That should be the lens for product, design, and engineering decisions.

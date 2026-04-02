@@ -1,302 +1,194 @@
-# Voice Codex Local
+# VOCOD
 
-Voice Codex Local is a desktop-first voice-native coding operator built around Codex.
+VOCOD is a desktop-first, voice-first AI coding workspace for macOS.
 
-It is designed to let a developer:
+This repository contains the local runtime, Electron shell, and React UI used to power the app.
 
-- talk to Codex naturally
-- keep every interaction visible as text
-- scope the assistant to a chosen project root
-- require approval before file changes
-- review diffs clearly
-- grow toward notes, memory, and multi-agent workflows
+## Document hierarchy
 
-## Core docs
+These files do different jobs and should not compete with each other:
 
-- `README.md`: repository overview and run instructions
-- `CLAUDE.md`: architecture overview and developer guidance for AI agents
-- `docs/RELEASE_MILESTONES.md`: active checkbox roadmap for `v1.0`, `v1.1`, `v1.2`, and `v2.0`
+- `docs/PRODUCT_GUIDE.md`: product truth
+- `docs/RELEASE_MILESTONES.md`: roadmap truth
+- `docs/VOCOD_WEBSITE_BRIEF.md`: website and marketing copy truth
+- `README.md`: repository, architecture, and local development guide
 
-Internal product/security planning docs are kept outside the tracked repository.
+If there is a mismatch, update the docs so this hierarchy stays true.
+
+## What VOCOD does
+
+VOCOD lets a developer:
+
+- talk to an AI coding assistant naturally
+- continue in text when needed
+- work inside an explicitly selected project boundary
+- keep writes approval-gated
+- review diffs before code changes land
+- switch between supported providers such as Codex and Claude Code
+
+The app is desktop-first.
+The browser shell in this repo is still useful for development, but it is not the intended public product surface.
 
 ## Repository layout
 
-- `apps/web`: React operator console that will be packaged into the macOS app shell
-- `apps/api`: local runtime API, voice/session orchestration, and Codex integration
+- `apps/web`: React operator console
+- `apps/api`: local runtime API, provider execution, voice orchestration, and persistence
 - `apps/desktop`: Electron shell for the packaged macOS app
-- `local-models/`: local speech models and runtimes such as `whisper.cpp` and Kokoro (gitignored)
+- `docs`: product, roadmap, and website docs
+- `local-models`: local speech runtimes and models such as Moonshine, Whisper, and Kokoro (gitignored)
 
-## What this build does
+## Architecture
 
-1. Uses your local `codex` CLI login instead of an OpenAI API key.
-2. Lets you ask coding questions by voice or text.
-3. Lets you select a project root and keep Codex read-only by default.
-4. Requires explicit approval before any file-changing run.
-5. Shows the latest approved code changes as a diff review panel.
-6. Stores text conversation history, not audio recordings.
+VOCOD has two distinct layers:
 
-## Product distribution model
+### Local runtime
 
-The public product direction is now:
+Runs on the user's Mac and owns:
 
-- a product website markets the app and distributes downloads
-- users download a macOS `.dmg`
-- the real coding agent, local file access, and local TTS runtime live on the user's Mac
-- Railway remains the support backend for product data, not the component that edits local code on disk
+- provider execution
+- local file and workspace access
+- voice capture and playback
+- approvals and diff review
+- desktop UI shell
 
-The browser UI in this repository remains the fastest development shell for now, but it is no longer the intended public product surface.
+This layer must stay local because it touches the user's machine and code.
 
-## Architecture now
+### Future cloud/product layer
 
-The intended shipping architecture is:
+Will later own:
 
-- `Electron` desktop shell for macOS
-- React UI packaged inside that shell
-- local runtime/API on the user's Mac for:
-  - Codex CLI access
-  - local repo/file access
-  - approval execution
-  - local TTS/runtime work
-- Railway backend + Postgres for product/backend concerns only
+- website and download flow
+- invite-only access and user accounts
+- sync-worthy product data
+- future analytics and product operations
 
-## Current product direction
+The coding runtime itself is not meant to be cloud-hosted.
 
-The product is evolving toward:
+## Current provider model
 
-- a premium macOS voice-first coding workstation
-- a website that distributes the desktop app
-- inbuilt meeting notes / memory in later releases
-- Railway-backed product data and sync
-- future specialist sub-agents
+VOCOD currently supports provider-aware app flows rather than a Codex-only experience.
 
-The working milestone tracker is `docs/RELEASE_MILESTONES.md`.
+Supported direction:
 
-## Auth model today
+- OpenAI Codex
+- Anthropic Claude Code
 
-There is no `OPENAI_API_KEY` in this build.
+Important product rule:
 
-- Assistant access: your local `codex` CLI login session only
+- provider credentials stay with the provider CLI
+- VOCOD only manages app-level connection state and preferences
 
-If `codex login status` does not show you as logged in, run:
+## Local development
 
-```bash
-codex login --device-auth
-```
+Run these from the repository root.
 
-Then complete the browser flow and choose Google sign-in there.
-
-## Local run
-
-1. Create `.env` in the repo root from `.env.example`.
-2. Make sure `codex login status` shows you as logged in.
-3. Start Postgres locally or point `DATABASE_URL` at an existing instance.
-4. Install dependencies:
+### Install dependencies
 
 ```bash
 npm install
 ```
 
-5. Apply the initial database schema:
+### Environment
+
+Create a root `.env` from `.env.example`.
+
+Key environment variables include:
+
+```bash
+APP_ENV=development
+API_PORT=8787
+API_HOST=127.0.0.1
+CORS_ORIGIN=http://localhost:5173
+DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/vocod
+DATABASE_SSL=false
+CODEX_COMMAND=codex
+CLAUDE_COMMAND=claude
+VOICE_LOCALE=en-US
+STT_PROVIDER=moonshine-local
+STT_FALLBACK_PROVIDER=whisper-local
+TTS_PROVIDER=kokoro
+KOKORO_VOICE=am_michael
+KOKORO_SPEED=1
+```
+
+The exact optional model/runtime paths depend on your local machine setup.
+
+### Database
+
+Apply migrations:
 
 ```bash
 npm run db:migrate --workspace @voice-codex/api
 ```
 
-6. Start both apps:
+### Start the app
+
+Start frontend and backend together:
 
 ```bash
 npm run dev
 ```
 
-7. Open `http://localhost:5173`.
+Open:
 
-This browser run is the current development shell. The shipping product target is the packaged macOS app.
-
-## Desktop shell status
-
-The Electron app shell now lives in `apps/desktop`.
-
-Current role:
-
-- open the React UI inside a native macOS window
-- become the future home for desktop packaging, DMG distribution, and app-level integrations
-- own the local runtime lifecycle during desktop development
-
-Next work after this scaffold:
-
-- connect more desktop-only integrations through preload/IPC
-- add DMG packaging, signing, and notarization
-
-## Startup guide for developers and agents
-
-Run these from the repository root unless noted otherwise.
-
-### Full app
-
-Start backend and frontend together:
-
-```bash
-npm run dev
+```text
+http://localhost:5173
 ```
 
-Build backend and frontend together:
-
-```bash
-npm run build
-```
-
-### Frontend only
-
-Start the frontend dev server:
-
-```bash
-npm run dev --workspace @voice-codex/web
-```
-
-Build the frontend:
-
-```bash
-npm run build --workspace @voice-codex/web
-```
-
-Preview the built frontend:
-
-```bash
-npm run preview --workspace @voice-codex/web
-```
-
-Run frontend unit tests:
-
-```bash
-npm run test --workspace @voice-codex/web
-```
-
-### Desktop shell
-
-Start the desktop development flow:
+### Start the desktop flow
 
 ```bash
 npm run dev:desktop
 ```
 
-This starts the web renderer, then Electron launches and manages the local API runtime.
+This launches the web renderer and Electron shell, and Electron manages the local API runtime.
 
-Build the Electron shell:
+## Workspace commands
 
-```bash
-npm run build --workspace @voice-codex/desktop
-```
-
-Start the Electron shell after building it:
+### Full app
 
 ```bash
-npm run start --workspace @voice-codex/desktop
+npm run dev
+npm run build
 ```
 
-### Backend only
+### Web
 
-Start the backend dev server:
+```bash
+npm run dev --workspace @voice-codex/web
+npm run build --workspace @voice-codex/web
+npm run preview --workspace @voice-codex/web
+npm run test --workspace @voice-codex/web
+```
+
+### API
 
 ```bash
 npm run dev --workspace @voice-codex/api
-```
-
-Build the backend:
-
-```bash
 npm run build --workspace @voice-codex/api
-```
-
-Start the built backend:
-
-```bash
 npm run start --workspace @voice-codex/api
-```
-
-Run backend tests:
-
-```bash
 npm run test --workspace @voice-codex/api
-```
-
-Apply database migrations:
-
-```bash
 npm run db:migrate --workspace @voice-codex/api
 ```
 
-## Environment
+### Desktop
 
 ```bash
-APP_ENV=development
-API_PORT=8787
-CORS_ORIGIN=http://localhost:5173
-CODEX_COMMAND=codex
-CODEX_MODEL=
-CODEX_REASONING_EFFORT=
-DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/voice_codex_local
-DATABASE_SSL=false
-QUEUE_PROVIDER=inline
-EMAIL_PROVIDER=none
-VECTOR_PROVIDER=none
-RAG_PROVIDER=none
-OCR_PROVIDER=none
-VOICE_LOCALE=en-US
-STT_PROVIDER=none
-STT_FALLBACK_PROVIDER=none
-WHISPER_MODEL_PATH=
-WHISPER_MULTILINGUAL_MODEL_PATH=
-WHISPER_SERVER_PORT=8791
-TRANSCRIPTION_LANGUAGE_CODE=auto
-TTS_PROVIDER=none
-KOKORO_COMMAND=
-KOKORO_VOICE=am_michael
-KOKORO_LANG_CODE=a
-KOKORO_SPEED=1
+npm run dev:desktop
+npm run build --workspace @voice-codex/desktop
+npm run start --workspace @voice-codex/desktop
 ```
 
-## Current API shape
+## Local voice runtime setup
 
-- `GET /api/health/live`
-- `GET /api/health/ready`
-- `GET /api/system`
-- `GET /api/status`
-- `GET /api/codex/settings`
-- `PUT /api/codex/settings`
-- `GET /api/voice/settings`
-- `PUT /api/voice/settings`
-- `POST /api/voice/commands/resolve`
-- `POST /api/voice/commands/apply`
-- `POST /api/tts/synthesize`
-- `POST /api/workspace/project`
-- `POST /api/workspace/write-access`
-- `POST /api/codex/logout`
-- `GET /api/logs`
-- `DELETE /api/logs`
-- `POST /api/chat/text`
-- `POST /api/approvals/:approvalId/approve`
-- `POST /api/approvals/:approvalId/reject`
+### Kokoro
 
-## Audio engine note
+VOCOD uses Kokoro as the current local TTS direction.
 
-Current `v1.0.0` direction:
-
-- speech-to-text and playback behavior are being optimized for the macOS desktop runtime
-- text transcripts remain durable; audio should stay ephemeral
-- spoken output uses a pluggable TTS path
-- current backend TTS provider is configurable through `TTS_PROVIDER`
-- current preferred local provider direction is `Kokoro-82M`
-- current preferred low-latency local STT direction is `Moonshine`, with `whisper.cpp` kept as fallback
-- generated assistant audio is deleted after playback and should never become durable user data
-
-The public product is no longer a browser-first web app. The website is the download surface for the desktop app.
-
-## Local Kokoro setup
-
-If you want local assistant speech output during development, install Kokoro in a dedicated virtualenv and point the backend at the repo wrapper.
+Typical setup:
 
 ```bash
-cd /Users/amansingh/Desktop/org/voice-codex-local/local-models/kokoro
+cd local-models/kokoro
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
@@ -304,24 +196,16 @@ brew install espeak-ng ffmpeg
 pip install "kokoro>=0.9.4" soundfile torch
 ```
 
-Then set your `.env` values:
+Then point your env at the worker command used in this repo.
+
+### Moonshine
+
+VOCOD uses Moonshine as the preferred low-latency local STT direction, with Whisper kept as fallback.
+
+Typical setup:
 
 ```bash
-TTS_PROVIDER=kokoro
-KOKORO_COMMAND=/Users/amansingh/Desktop/org/voice-codex-local/local-models/kokoro/.venv/bin/python /Users/amansingh/Desktop/org/voice-codex-local/apps/api/scripts/kokoro_tts.py
-KOKORO_VOICE=am_michael
-KOKORO_LANG_CODE=a
-KOKORO_SPEED=1
-```
-
-Generated audio is treated as temporary playback data and is deleted after use.
-
-## Local Moonshine setup
-
-If you want the lower-latency local STT path, install Moonshine in a dedicated virtualenv and point the backend at the repo worker.
-
-```bash
-cd /Users/amansingh/Desktop/org/voice-codex-local/local-models
+cd local-models
 mkdir -p moonshine
 cd moonshine
 python3 -m venv .venv
@@ -330,33 +214,36 @@ python -m pip install --upgrade pip setuptools wheel
 pip install useful-moonshine-onnx
 ```
 
-Then set your `.env` values:
+Then point your env at the repo worker command.
 
-```bash
-STT_PROVIDER=moonshine-local
-STT_FALLBACK_PROVIDER=whisper-local
-MOONSHINE_WORKER_COMMAND=/Users/amansingh/Desktop/org/voice-codex-local/local-models/moonshine/.venv/bin/python /Users/amansingh/Desktop/org/voice-codex-local/apps/api/scripts/moonshine_worker.py
-MOONSHINE_MODEL=moonshine/base
-```
+## Security posture
 
-Moonshine integrates as a local worker so the model stays warm during the voice session.
+The current local runtime includes:
 
-## Backend infrastructure direction
+- localhost-only API binding
+- per-install local API auth token
+- workspace root validation
+- secret-path enforcement
+- diff/status filtering for protected paths
+- tighter desktop IPC boundaries
 
-For the current stage, the backend should stay intentionally lean:
+This is still beta software.
+The right way to treat the repo is as a serious desktop product under active hardening, not as a finished public platform.
 
-- `Postgres` now
-- `pgvector` later only if semantic memory becomes necessary
-- no Kafka yet
-- no heavy queue platform yet
-- no RAG system yet
-- no OCR service yet
+## Release posture
 
-Recommended progression:
+Current release posture:
 
-1. Postgres as the primary durable store
-2. Redis-backed jobs later if background work becomes real
-3. `pgvector` inside Postgres if note or memory search needs semantic retrieval
-4. a simple email provider later, such as SendGrid or Resend
+`0.1.x beta`
 
-This is the right shape for an early Railway deployment without overbuilding the backend before the product earns it.
+Meaning:
+
+- invite-only beta is the current real target
+- public-beta packaging/distribution work is next
+- `1.0.0` should mean a serious public VOCOD release, not “first thing that works”
+
+See:
+
+- `docs/PRODUCT_GUIDE.md`
+- `docs/RELEASE_MILESTONES.md`
+- `docs/VOCOD_WEBSITE_BRIEF.md`
