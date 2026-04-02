@@ -1,9 +1,13 @@
-import { useEffect, useState } from 'react';
-import { parseDiffRows } from '../lib/diff';
-import { formatTimestamp, summarizeApproval } from '../lib/helpers';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { parseFileDiff } from '../lib/diff';
 import type { ApprovalHistoryEntry, DiffSummary, PendingApproval } from '../lib/types';
+import { ApprovalHistory } from './ApprovalHistory';
+import { FileTree } from './FileTree';
+import { ReviewFileCard } from './ReviewFileCard';
+import { ReviewHeader } from './ReviewHeader';
 
 interface ReviewScreenProps {
+  assistantLabel: string;
   pendingApproval: PendingApproval | null;
   lastDiff: DiffSummary | null;
   approvalHistory: ApprovalHistoryEntry[];
@@ -11,224 +15,203 @@ interface ReviewScreenProps {
   onReject: () => void;
 }
 
-function countDiffStats(diff: string) {
-  let additions = 0;
-  let deletions = 0;
-  for (const line of diff.split('\n')) {
-    if (line.startsWith('+') && !line.startsWith('+++')) {
-      additions += 1;
-    } else if (line.startsWith('-') && !line.startsWith('---')) {
-      deletions += 1;
-    }
-  }
-  return { additions, deletions };
-}
-
-function shortenPath(filePath: string) {
-  const parts = filePath.split('/');
-  if (parts.length <= 2) {
-    return filePath;
-  }
-  return `${parts.at(-2)}/${parts.at(-1)}`;
+function toAnchorId(filePath: string) {
+  return `review-file-${filePath.replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase()}`;
 }
 
 export function ReviewScreen({
+  assistantLabel,
   pendingApproval,
   lastDiff,
   approvalHistory,
   onApprove,
   onReject
 }: ReviewScreenProps) {
-  const [selectedFilePath, setSelectedFilePath] = useState<string | null>(lastDiff?.files[0]?.filePath ?? null);
+  const [viewedFiles, setViewedFiles] = useState<Set<string>>(new Set());
+  const [activeFilePath, setActiveFilePath] = useState<string | null>(null);
+  const [diffMode, setDiffMode] = useState<'split' | 'unified'>(() =>
+    typeof window !== 'undefined' && window.innerWidth < 768 ? 'unified' : 'split'
+  );
+  const [collapsedFiles, setCollapsedFiles] = useState<Set<string>>(new Set());
+  const [fileTreeOpen, setFileTreeOpen] = useState(false);
+  const fileCardRefs = useRef<Map<string, HTMLElement>>(new Map());
 
-  useEffect(() => {
-    setSelectedFilePath((current) => {
-      if (!lastDiff?.files.length) {
-        return null;
-      }
-
-      if (current && lastDiff.files.some((file) => file.filePath === current)) {
-        return current;
-      }
-
-      return lastDiff.files[0].filePath;
+  const fileStats = useMemo(() => {
+    if (!lastDiff?.files) return [];
+    return lastDiff.files.map((file) => {
+      const parsed = parseFileDiff(file.diff);
+      return {
+        filePath: file.filePath,
+        additions: parsed.stats.additions,
+        deletions: parsed.stats.deletions
+      };
     });
   }, [lastDiff]);
 
-  const selectedDiffFile =
-    lastDiff?.files.find((file) => file.filePath === selectedFilePath) ?? lastDiff?.files[0] ?? null;
-  const diffRows = selectedDiffFile ? parseDiffRows(selectedDiffFile.diff) : [];
-  const totalStats = lastDiff?.files.reduce(
-    (acc, file) => {
-      const stats = countDiffStats(file.diff);
-      return { additions: acc.additions + stats.additions, deletions: acc.deletions + stats.deletions };
-    },
-    { additions: 0, deletions: 0 }
-  ) ?? { additions: 0, deletions: 0 };
+  const totalStats = useMemo(
+    () =>
+      fileStats.reduce(
+        (acc, s) => ({ additions: acc.additions + s.additions, deletions: acc.deletions + s.deletions }),
+        { additions: 0, deletions: 0 }
+      ),
+    [fileStats]
+  );
+
+  useEffect(() => {
+    setViewedFiles(new Set());
+    setCollapsedFiles(new Set());
+    setActiveFilePath(null);
+  }, [pendingApproval?.id]);
+
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            const filePath = entry.target.getAttribute('data-filepath');
+            if (filePath) {
+              setActiveFilePath(filePath);
+            }
+          }
+        }
+      },
+      { threshold: 0.1 }
+    );
+
+    for (const el of fileCardRefs.current.values()) {
+      observer.observe(el);
+    }
+
+    return () => observer.disconnect();
+  }, [lastDiff]);
+
+  const handleFileClick = useCallback((filePath: string) => {
+    const element = document.getElementById(toAnchorId(filePath));
+    if (element) {
+      element.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    setFileTreeOpen(false);
+  }, []);
+
+  const handleToggleCollapse = useCallback((filePath: string) => {
+    setCollapsedFiles((prev) => {
+      const next = new Set(prev);
+      if (next.has(filePath)) {
+        next.delete(filePath);
+      } else {
+        next.add(filePath);
+      }
+      return next;
+    });
+  }, []);
+
+  const handleToggleViewed = useCallback((filePath: string) => {
+    setViewedFiles((prev) => {
+      const next = new Set(prev);
+      if (next.has(filePath)) {
+        next.delete(filePath);
+      } else {
+        next.add(filePath);
+      }
+      return next;
+    });
+  }, []);
+
+  const handleToggleDiffMode = useCallback(() => {
+    setDiffMode((prev) => (prev === 'split' ? 'unified' : 'split'));
+  }, []);
+
+  const setFileCardRef = useCallback((filePath: string, el: HTMLElement | null) => {
+    if (el) {
+      el.setAttribute('data-filepath', filePath);
+      fileCardRefs.current.set(filePath, el);
+    } else {
+      fileCardRefs.current.delete(filePath);
+    }
+  }, []);
+
+  const viewedCount = fileStats.filter((f) => viewedFiles.has(f.filePath)).length;
+  const hasFiles = (lastDiff?.files.length ?? 0) > 0;
 
   return (
     <section className="screen review-screen">
-      <div className="section-head">
-        <div>
-          <p className="section-kicker">Code Review</p>
-          <h2>Review proposed changes before they touch your workspace.</h2>
-        </div>
-        <div className="section-chip-group">
-          <span className="section-chip">{summarizeApproval(pendingApproval)}</span>
-          {lastDiff?.changedFiles.length ? (
-            <>
-              <span className="section-chip">{lastDiff.changedFiles.length} files</span>
-              {totalStats.additions > 0 ? <span className="section-chip approved">+{totalStats.additions}</span> : null}
-              {totalStats.deletions > 0 ? <span className="section-chip rejected">-{totalStats.deletions}</span> : null}
-            </>
-          ) : null}
-        </div>
-      </div>
+      <ReviewHeader
+        assistantLabel={assistantLabel}
+        pendingApproval={pendingApproval}
+        totalFiles={fileStats.length}
+        totalAdditions={totalStats.additions}
+        totalDeletions={totalStats.deletions}
+        viewedCount={viewedCount}
+        diffMode={diffMode}
+        onToggleDiffMode={handleToggleDiffMode}
+        onApprove={onApprove}
+        onReject={onReject}
+        onToggleFileTree={hasFiles ? () => setFileTreeOpen((prev) => !prev) : undefined}
+      />
 
-      <div className="review-layout">
-        <section className="content-card">
-          <div className="card-head">
-            <div>
-              <span className="metric-label">Pending request</span>
-              <strong>{pendingApproval?.title ?? 'No pending write request'}</strong>
-            </div>
-            {pendingApproval ? <span className="section-chip pending">approval waiting</span> : null}
-          </div>
+      {hasFiles ? (
+        <div className="review-layout">
+          <aside className={`review-sidebar${fileTreeOpen ? ' review-sidebar-open' : ''}`}>
+            <FileTree
+              files={fileStats}
+              viewedFiles={viewedFiles}
+              activeFilePath={activeFilePath}
+              onFileClick={handleFileClick}
+            />
+          </aside>
 
-          {pendingApproval ? (
-            <div className="approval-stack">
-              <p className="approval-summary">{pendingApproval.summary}</p>
-              <ul className="task-list">
-                {pendingApproval.tasks.map((task) => (
-                  <li key={task}>{task}</li>
-                ))}
-              </ul>
-              <div className="action-row">
-                <button className="button-primary" onClick={onApprove} type="button">
-                  Approve changes
-                </button>
-                <button className="button-secondary danger" onClick={onReject} type="button">
-                  Reject
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="empty-state compact">
-              <p>No approval is waiting right now.</p>
-              <span>Once Codex proposes a write task, it will show up here for explicit review.</span>
-            </div>
-          )}
-        </section>
-
-        <section className="diff-panel">
-          <div className="diff-header">
-            <div>
-              <span className="metric-label">Changed files</span>
-              <strong>{selectedDiffFile?.filePath ?? 'No diff captured yet'}</strong>
-            </div>
-          </div>
-
-          {selectedDiffFile && lastDiff ? (
-            <>
-              <div className="diff-file-tabs" role="tablist" aria-label="Changed files">
-                {lastDiff.files.map((file) => {
-                  const stats = countDiffStats(file.diff);
-                  const isActive = selectedDiffFile.filePath === file.filePath;
-
-                  return (
-                    <button
-                      key={file.filePath}
-                      className={`diff-file-tab ${isActive ? 'active' : ''}`}
-                      onClick={() => setSelectedFilePath(file.filePath)}
-                      type="button"
-                    >
-                      <span className="diff-file-tab-name">{shortenPath(file.filePath)}</span>
-                      <span className="diff-file-tab-stats">
-                        {stats.additions > 0 ? <span className="diff-stat-add">+{stats.additions}</span> : null}
-                        {stats.deletions > 0 ? <span className="diff-stat-del">-{stats.deletions}</span> : null}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-
-              <div className="diff-split-view">
-                <div className="diff-pane">
-                  <div className="diff-pane-header">
-                    <span>Current</span>
-                    <span className="diff-pane-path">{shortenPath(selectedDiffFile.filePath)}</span>
-                  </div>
-                  <div className="diff-rows">
-                    {diffRows.map((row, index) => (
-                      <div key={`left-${index}`} className={`diff-row ${row.leftKind}`}>
-                        <span className="diff-line-number">{row.leftLineNumber ?? ''}</span>
-                        <span className="diff-line-marker">
-                          {row.leftKind === 'remove' ? '-' : row.leftKind === 'context' ? ' ' : ''}
-                        </span>
-                        <code>{row.leftText || ' '}</code>
-                      </div>
-                    ))}
-                  </div>
+          <div className="review-main">
+            {pendingApproval?.tasks && pendingApproval.tasks.length > 0 ? (
+              <section className="content-card review-tasks-card">
+                <span className="metric-label">Planned tasks</span>
+                <div className="review-task-list">
+                  {pendingApproval.tasks.map((task, index) => (
+                    <div className="review-task-item" key={`${task}-${index}`}>
+                      <span className="review-task-index">{index + 1}</span>
+                      <span>{task}</span>
+                    </div>
+                  ))}
                 </div>
-                <div className="diff-pane">
-                  <div className="diff-pane-header">
-                    <span>Proposed</span>
-                    <span className="diff-pane-path">{shortenPath(selectedDiffFile.filePath)}</span>
-                  </div>
-                  <div className="diff-rows">
-                    {diffRows.map((row, index) => (
-                      <div key={`right-${index}`} className={`diff-row ${row.rightKind}`}>
-                        <span className="diff-line-number">{row.rightLineNumber ?? ''}</span>
-                        <span className="diff-line-marker">
-                          {row.rightKind === 'add' ? '+' : row.rightKind === 'context' ? ' ' : ''}
-                        </span>
-                        <code>{row.rightText || ' '}</code>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </>
-          ) : (
+              </section>
+            ) : null}
+
+            {lastDiff!.files.map((file, fileIndex) => {
+              const stats = fileStats.find((s) => s.filePath === file.filePath) ?? {
+                filePath: file.filePath,
+                additions: 0,
+                deletions: 0
+              };
+              return (
+                <ReviewFileCard
+                  key={file.filePath}
+                  ref={(el) => setFileCardRef(file.filePath, el)}
+                  file={file}
+                  fileIndex={fileIndex}
+                  pendingApproval={pendingApproval}
+                  diffMode={diffMode}
+                  isCollapsed={collapsedFiles.has(file.filePath)}
+                  isViewed={viewedFiles.has(file.filePath)}
+                  onToggleCollapse={handleToggleCollapse}
+                  onToggleViewed={handleToggleViewed}
+                  stats={stats}
+                />
+              );
+            })}
+
+            <ApprovalHistory approvalHistory={approvalHistory} />
+          </div>
+        </div>
+      ) : (
+        <div className="review-main">
+          <section className="content-card">
             <div className="empty-state compact">
               <p>No diff available yet.</p>
-              <span>Once approved edits run, the latest captured diff will appear here.</span>
+              <span>Once the assistant proposes file changes, the full review will appear here.</span>
             </div>
-          )}
-        </section>
-      </div>
-
-      <section className="content-card">
-        <div className="card-head">
-          <div>
-            <span className="metric-label">Approval history</span>
-            <strong>Recent write decisions</strong>
-          </div>
+          </section>
+          <ApprovalHistory approvalHistory={approvalHistory} />
         </div>
-        <div className="history-list">
-          {approvalHistory.length === 0 ? (
-            <div className="empty-state compact">
-              <p>No recorded approval history yet.</p>
-              <span>Approved and rejected write requests will accumulate here.</span>
-            </div>
-          ) : (
-            approvalHistory.map((entry) => (
-              <article key={entry.id} className="history-item">
-                <div>
-                  <strong>{entry.taskTitle}</strong>
-                  <p>{entry.taskSummary}</p>
-                </div>
-                <div className="history-meta">
-                  <span className={`section-chip ${entry.approved ? 'approved' : 'rejected'}`}>
-                    {entry.approved ? 'approved' : 'rejected'}
-                  </span>
-                  <small>{formatTimestamp(entry.reviewedAt)}</small>
-                </div>
-              </article>
-            ))
-          )}
-        </div>
-      </section>
+      )}
     </section>
   );
 }
