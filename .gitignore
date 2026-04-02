@@ -21,5 +21,6 @@ native/
 stitch_mobile_voice_console/
 *.docx
 Codex/
-Claude/
+/Claude/
 .claude/
+LAUNCH_TRACKER.md
